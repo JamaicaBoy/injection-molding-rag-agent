@@ -1,0 +1,20 @@
+app:
+  name: injection-molding-rag-agent
+  environment: dev
+  log_level: INFO
+
+llm:
+  provider: ollama
+  model: qwen2.5:7b
+  base_url: http://localhost:11434
+
+embedding:
+  provider: sentence-transformers
+  model: "E:/AI_Models/BAAI/bge-m3"
+  local_model_path: "E:/AI_Models/BAAI/bge-m3"
+  device: auto
+
+paths:
+  data_dir: data
+  outputs_dir: outputs
+  vector_store_dir: vector_store

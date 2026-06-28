@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local data, do not upload to normal Git repo
+data/raw_papers/
+data/dev_papers/
+data/selected_papers/
+data/interim/
+data/processed/
+data/chunks/
+data/logs/
+data/manual_review/
+vector_store/
+
+# Large artifacts
+artifacts/
+full_artifact/
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.parquet
+*.sqlite
+*.db
+
+# Streamlit secrets
+.streamlit/secrets.toml

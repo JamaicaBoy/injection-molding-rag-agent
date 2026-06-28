@@ -1,0 +1,16 @@
+retrieval:
+  chunk_size: 1000
+  chunk_overlap: 150
+  top_k: 5
+  score_threshold: 0.0
+  dense_weight: 0.6
+  bm25_weight: 0.4
+
+embedding:
+  provider: sentence-transformers
+  model:  "E:/AI_Models/BAAI/bge-m3"
+  local_model_path: "E:/AI_Models/BAAI/bge-m3"
+
+vector_store:
+  persist_dir: vector_store/chroma
+  collection_name: injection_molding_chunks

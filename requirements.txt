@@ -1,0 +1,14 @@
+pymupdf
+pandas
+numpy
+tqdm
+pyyaml
+chromadb
+sentence-transformers
+rank-bm25
+streamlit
+pytest
+loguru
+pydantic
+scikit-learn
+python-dotenv
