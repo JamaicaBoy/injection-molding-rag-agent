@@ -24,6 +24,13 @@ data/logs/
 data/manual_review/
 vector_store/
 
+# Generated evaluation and metadata files
+data/eval/eval_questions.csv
+data/eval/generation_eval.csv
+data/eval/retrieval_eval.csv
+data/metadata/paper_inventory.csv
+data/metadata/selected_papers.csv
+
 # Large artifacts
 artifacts/
 full_artifact/
