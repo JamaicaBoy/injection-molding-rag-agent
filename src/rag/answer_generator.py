@@ -10,9 +10,9 @@ from typing import Any, Protocol
 
 import yaml
 
+from src.agent.context_manager import DEFAULT_TOKEN_BUDGET, DEFAULT_TOP_N_EVIDENCE, build_llm_context, render_prompt
 from src.index.build_vector_index import DEFAULT_COLLECTION, DEFAULT_PERSIST_DIR
 from src.rag.citation_guard import DEFAULT_REVIEW_QUEUE, append_review_queue, check_citations
-from src.rag.prompts import SYSTEM_PROMPT, build_answer_prompt
 from src.retrieval.bm25_retriever import BM25Retriever, DEFAULT_CHUNKS
 from src.retrieval.dense_retriever import DenseRetriever
 from src.retrieval.hybrid_retriever import merge_results
@@ -30,10 +30,19 @@ class LLMClient(Protocol):
 
 
 class OllamaClient:
-    def __init__(self, model: str, base_url: str, timeout: float = 120.0) -> None:
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        timeout: float = 120.0,
+        num_ctx: int = 2048,
+        keep_alive: int | str = 0,
+    ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.num_ctx = num_ctx
+        self.keep_alive = keep_alive
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         payload = json.dumps(
@@ -42,7 +51,8 @@ class OllamaClient:
                 "system": system_prompt,
                 "prompt": user_prompt,
                 "stream": False,
-                "options": {"temperature": 0.1},
+                "keep_alive": self.keep_alive,
+                "options": {"temperature": 0.1, "num_ctx": self.num_ctx},
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -54,12 +64,34 @@ class OllamaClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:800]
+            raise RuntimeError(f"Ollama request failed: HTTP {exc.code}: {detail}") from exc
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Ollama request failed: {exc}") from exc
         answer = str(result.get("response", "")).strip()
         if not answer:
             raise RuntimeError("Ollama returned an empty response.")
         return answer
+
+
+def unload_ollama_model(
+    model: str,
+    base_url: str,
+    timeout: float = 15.0,
+) -> bool:
+    payload = json.dumps({"model": model, "keep_alive": 0}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -69,6 +101,7 @@ class GeneratedAnswer:
     confidence: str
     limitations: list[str]
     need_human_review: bool
+    context_debug: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -134,30 +167,57 @@ class AnswerGenerator:
         question: str,
         query_rewrite: RewrittenQuery | dict[str, Any],
         evidence_results: list[dict[str, Any]],
+        conversation_history: list[Any] | None = None,
+        conversation_summary: str | None = None,
+        token_budget: int = DEFAULT_TOKEN_BUDGET,
+        top_n_evidence: int = DEFAULT_TOP_N_EVIDENCE,
+        conversation_id: str | None = None,
+        recent_turns: list[Any] | None = None,
     ) -> GeneratedAnswer:
+        self.active_mode = self.requested_mode
+        self.fallback_reason = None
         rewrite = rewrite_to_dict(query_rewrite)
         evidence_list = prepare_evidence(evidence_results)
         limitations: list[str] = []
+        context_debug: dict[str, Any] | None = None
 
         if not evidence_list:
             answer = "当前论文库证据不足。"
             limitations.append("no_retrieval_evidence")
-        elif self.active_mode == "mock":
-            answer = self._mock_answer(rewrite, evidence_list)
-            limitations.append("mock_mode_does_not_generate_new_synthesis")
         else:
-            try:
-                if self.llm_client is None:
-                    raise RuntimeError("Ollama client is not initialized.")
-                prompt = build_answer_prompt(question, rewrite, evidence_list)
-                answer = self.llm_client.generate(SYSTEM_PROMPT, prompt)
-            except Exception as exc:
-                if not self.fallback_to_mock:
-                    raise
-                self.active_mode = "mock"
-                self.fallback_reason = f"{type(exc).__name__}: {exc}"
+            # All prompt construction goes through context_manager so that
+            # conversation history, evidence, and risk rules are assembled
+            # under one priority-ordered, token-budgeted policy instead of
+            # being formatted ad hoc per call site.
+            managed_context = build_llm_context(
+                current_query=question,
+                query_info=rewrite,
+                conversation_history=conversation_history,
+                conversation_summary=conversation_summary,
+                reranked_evidence=evidence_list,
+                token_budget=token_budget,
+                top_n_evidence=top_n_evidence,
+                conversation_id=conversation_id,
+                recent_turns=recent_turns,
+            )
+            context_debug = managed_context.context_debug
+
+            if self.active_mode == "mock":
                 answer = self._mock_answer(rewrite, evidence_list)
-                limitations.append(f"ollama_unavailable_fallback_to_mock: {self.fallback_reason}")
+                limitations.append("mock_mode_does_not_generate_new_synthesis")
+            else:
+                try:
+                    if self.llm_client is None:
+                        raise RuntimeError("Ollama client is not initialized.")
+                    prompt = render_prompt(managed_context.llm_context, query_info=rewrite)
+                    answer = self.llm_client.generate(managed_context.llm_context["system_instruction"], prompt)
+                except Exception as exc:
+                    if not self.fallback_to_mock:
+                        raise
+                    self.active_mode = "mock"
+                    self.fallback_reason = f"{type(exc).__name__}: {exc}"
+                    answer = self._mock_answer(rewrite, evidence_list)
+                    limitations.append(f"ollama_unavailable_fallback_to_mock: {self.fallback_reason}")
 
         guard = check_citations(answer, evidence_list)
         limitations.extend(guard.issues)
@@ -180,6 +240,7 @@ class AnswerGenerator:
             confidence=confidence,
             limitations=limitations,
             need_human_review=need_human_review,
+            context_debug=context_debug,
         )
 
     @staticmethod
@@ -238,4 +299,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
