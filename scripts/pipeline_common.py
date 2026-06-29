@@ -50,8 +50,8 @@ def dev_paths() -> IngestPaths:
         method_cards=PROJECT_ROOT / "data/processed/method_cards.jsonl",
         parameter_cards=PROJECT_ROOT / "data/processed/parameter_cards.jsonl",
         review_queue=PROJECT_ROOT / "data/manual_review/review_queue.csv",
-        chunks=PROJECT_ROOT / "data/chunks/chunks.jsonl",
-        chunk_report=PROJECT_ROOT / "data/chunks/chunk_report.md",
+        chunks=PROJECT_ROOT / "data/chunks/dev_chunks.jsonl",
+        chunk_report=PROJECT_ROOT / "data/chunks/dev_chunks_report.md",
     )
 
 

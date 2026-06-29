@@ -22,6 +22,10 @@ data/processed/
 data/chunks/
 data/logs/
 data/manual_review/
+data/uploads/
+data/runtime/
+data/runtime/chat_sessions/
+data/runtime/*.json
 vector_store/
 
 # Generated evaluation and metadata files
@@ -29,12 +33,16 @@ data/eval/eval_questions.csv
 data/eval/generation_eval.csv
 data/eval/retrieval_eval.csv
 data/metadata/paper_inventory.csv
+data/metadata/paper_metadata.csv
 data/metadata/selected_papers.csv
 
 # Large artifacts
-artifacts/
+artifacts/*
+!artifacts/README.md
 full_artifact/
+/full_artifact_manifest.json
 *.zip
+*.zip.[0-9][0-9][0-9]
 *.7z
 *.rar
 *.tar
@@ -42,6 +50,14 @@ full_artifact/
 *.parquet
 *.sqlite
 *.db
+
+# full_release_no_pdf_v1 GitHub Release package (downloaded locally, not committed)
+artifacts/full_release_no_pdf_v1/
+**/full_release_no_pdf_v1.zip
+**/full_release_no_pdf_v1.zip.[0-9][0-9][0-9]
+dist/full_release_no_pdf_v1/
+dist/download_staging/
+release_manifest/
 
 # Streamlit secrets
 .streamlit/secrets.toml

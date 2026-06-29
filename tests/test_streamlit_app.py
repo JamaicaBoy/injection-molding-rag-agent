@@ -48,7 +48,8 @@ def test_retrieval_stats_hide_absolute_persist_path(monkeypatch) -> None:
             "dense_results_count": 5,
             "bm25_results_count": 5,
             "hybrid_results_count": 5,
-        }
+        },
+        corpus_mode="dev",
     )
 
     assert captured["chroma_persist_dir"] == "vector_store/chroma"

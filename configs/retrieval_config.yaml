@@ -10,7 +10,3 @@ embedding:
   provider: sentence-transformers
   model:  "E:/AI_Models/BAAI/bge-m3"
   local_model_path: "E:/AI_Models/BAAI/bge-m3"
-
-vector_store:
-  persist_dir: vector_store/chroma
-  collection_name: injection_molding_chunks

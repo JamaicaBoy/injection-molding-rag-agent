@@ -1,0 +1,65 @@
+corpus_mode: full
+local_default_mode: full
+public_default_mode: public_full_artifact
+public_fallback_modes:
+  - public_sample
+  - upload_only
+
+modes:
+  dev:
+    chunks_path: data/chunks/dev_chunks.jsonl
+    vector_persist_dir: vector_store/chroma_dev
+    collection_name: injection_papers_dev
+    raw_papers_dir: data/dev_papers
+    upload_dir: data/uploads
+    allow_upload: false
+    is_public_demo: false
+    legacy_fallback:
+      chunks_path: data/chunks/chunks.jsonl
+      vector_persist_dir: vector_store/chroma
+      collection_name: injection_molding_chunks
+
+  selected:
+    chunks_path: data/chunks/selected_chunks.jsonl
+    vector_persist_dir: vector_store/chroma_selected
+    collection_name: injection_papers_selected
+    raw_papers_dir: data/selected_papers
+    upload_dir: data/uploads
+    allow_upload: false
+    is_public_demo: false
+
+  full:
+    chunks_path: data/chunks/full_chunks.jsonl
+    vector_persist_dir: vector_store/chroma_full
+    collection_name: injection_papers_full
+    raw_papers_dir: data/raw_papers
+    upload_dir: data/uploads
+    allow_upload: false
+    is_public_demo: false
+
+  public_sample:
+    chunks_path: data/chunks/public_sample_chunks.jsonl
+    vector_persist_dir: vector_store/chroma_public_sample
+    collection_name: injection_papers_public_sample
+    raw_papers_dir: data/sample_papers
+    upload_dir: data/uploads
+    allow_upload: false
+    is_public_demo: true
+
+  public_full_artifact:
+    chunks_path: artifacts/full_release_no_pdf_v1/data/chunks/full_chunks.jsonl
+    vector_persist_dir: artifacts/full_release_no_pdf_v1/vector_store/chroma_full
+    collection_name: injection_papers_full
+    raw_papers_dir: artifacts/full_release_no_pdf_v1/data/raw_papers
+    upload_dir: data/uploads
+    allow_upload: false
+    is_public_demo: true
+
+  upload_only:
+    chunks_path: data/runtime/upload_index/chunks.jsonl
+    vector_persist_dir: data/runtime/upload_index/chroma
+    collection_name: injection_papers_upload_session
+    raw_papers_dir: data/uploads
+    upload_dir: data/uploads
+    allow_upload: true
+    is_public_demo: true

@@ -18,7 +18,8 @@ from scripts.pipeline_common import (  # noqa: E402
     resolve_project_path,
     run_step,
 )
-from src.index.build_vector_index import DEFAULT_COLLECTION, build_index  # noqa: E402
+from src.config import SUPPORTED_CORPUS_MODES, load_corpus_config  # noqa: E402
+from src.index.build_vector_index import build_index  # noqa: E402
 
 
 def configured_model() -> str | None:
@@ -31,9 +32,10 @@ def configured_model() -> str | None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the Chroma index from an existing chunks JSONL file.")
-    parser.add_argument("--chunks", type=Path, default=Path("data/chunks/chunks.jsonl"))
-    parser.add_argument("--persist_dir", type=Path, default=Path("vector_store/chroma"))
-    parser.add_argument("--collection", default=DEFAULT_COLLECTION)
+    parser.add_argument("--corpus_mode", choices=SUPPORTED_CORPUS_MODES, default=None)
+    parser.add_argument("--chunks", type=Path, default=None)
+    parser.add_argument("--persist_dir", type=Path, default=None)
+    parser.add_argument("--collection", default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--limit", type=int, default=None)
@@ -45,8 +47,12 @@ def main() -> int:
     args = parse_args()
     logger, log_path = create_logger("run_build_index")
     try:
-        chunks_path = resolve_project_path(args.chunks)
-        persist_dir = resolve_project_path(args.persist_dir)
+        effective_corpus = load_corpus_config(mode=args.corpus_mode)
+        configured_corpus = load_corpus_config(mode=args.corpus_mode, prefer_configured=True)
+        corpus = configured_corpus if configured_corpus.chunks_path.is_file() else effective_corpus
+        chunks_path = resolve_project_path(args.chunks) if args.chunks else corpus.chunks_path
+        persist_dir = resolve_project_path(args.persist_dir) if args.persist_dir else corpus.vector_persist_dir
+        collection_name = args.collection or corpus.collection_name
         model = args.model or configured_model()
         if not model:
             raise ValueError("No embedding model is configured. Pass --model explicitly.")
@@ -55,7 +61,7 @@ def main() -> int:
             lambda: build_index(
                 chunks_path=chunks_path,
                 persist_dir=persist_dir,
-                collection_name=args.collection,
+                collection_name=collection_name,
                 model_name=model,
                 reset=args.reset,
                 limit=args.limit,

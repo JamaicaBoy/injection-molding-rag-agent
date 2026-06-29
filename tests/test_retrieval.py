@@ -1,9 +1,13 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from src.retrieval.bm25_retriever import BM25Retriever, text_preview
-from src.retrieval.dense_retriever import DenseRetriever
+from src.retrieval.dense_retriever import (
+    DenseRetriever,
+    SubprocessSentenceTransformerQueryEncoder,
+)
 from src.retrieval.hybrid_retriever import merge_results
 from src.retrieval.retrieval_debug import inspect_retrieval_state
 
@@ -86,6 +90,22 @@ def test_dense_retrieval_returns_unified_structure() -> None:
     assert result["source"] == "dense"
     assert result["score"] == 0.8
     assert len(result["text_preview"]) <= 200
+
+
+def test_subprocess_query_encoder_parses_embedding_and_releases_model(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="[0.1, 0.2, 0.3]\n", stderr="")
+
+    monkeypatch.setattr("src.retrieval.dense_retriever.subprocess.run", fake_run)
+    encoder = SubprocessSentenceTransformerQueryEncoder("local-bge-m3")
+
+    assert encoder.encode_query("packing pressure") == [0.1, 0.2, 0.3]
+    assert captured["command"][-2:] == ["local-bge-m3", "packing pressure"]
+    assert captured["kwargs"]["timeout"] == 240.0
 
 
 def test_hybrid_merge_deduplicates_by_chunk_id() -> None:

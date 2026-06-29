@@ -1,5 +1,227 @@
 # PROJECT_STATUS.md
 
+## 2026-06-29 发布前检查
+
+- 已准备生成 GitHub Release 数据包。
+- GitHub remote、`main` 分支、敏感数据忽略规则和 Streamlit 启动 smoke test 已检查。
+- 当前默认 corpus mode 为 `full`，使用 `data/chunks/full_chunks.jsonl`、`vector_store/chroma_full` 和 collection `injection_papers_full`。
+- 当前工作区仍有已跟踪修改与未跟踪源码/配置/文档，正式提交前需要人工确认暂存范围；没有暂存、提交或推送大型数据文件。
+
+## 2026-06-29 GitHub Release Package: full_release_no_pdf_v1
+
+- The public full-corpus package is fixed to `full_release_no_pdf_v1`; there are no alternative packaging modes.
+- Added the fixed GitHub Release configuration in `configs/artifact_config.yaml` with release tag `full-release-v1`.
+- Rebuilt `scripts/package_full_release.py` to package only full chunks, public metadata, the requested knowledge-card files, and `vector_store/chroma_full` plus the generated manifest files.
+- The packager rejects every PDF and every path containing `raw_papers`; it never reads or packages the 896 source PDFs.
+- Archives larger than 1.5 GiB are split as `full_release_no_pdf_v1.zip.001`, `.002`, `.003`, and so on.
+- Rebuilt `scripts/verify_full_release.py` to verify SHA256, JSONL validity, unique paper IDs, Chroma readability, vector count, and embedding dimension.
+- Rebuilt `scripts/download_full_release.py` to use GitHub Release assets only, require consecutive numbered parts, extract safely into a temporary directory, verify there, and install only after verification passes.
+- `public_full_artifact` now reads from `artifacts/full_release_no_pdf_v1/`.
+- Generated `data/metadata/paper_metadata.csv` from the existing 896-row full inventory without reading PDF contents.
+- Real-data preflight: 28 payload files, about 627.3 MiB before ZIP compression, 43,343 chunks, 559 unique chunk paper IDs, 43,343 Chroma vectors, 1,024 dimensions, and zero PDFs.
+- Packaging now uses an offline Chroma snapshot in an ASCII temporary directory, preventing live SQLite changes and Unicode-path HNSW failures from invalidating checksums.
+- The packager verifies every ZIP member against `MANIFEST.json` before reporting success; the verifier opens a disposable Chroma copy so verification never mutates the artifact.
+- Tests: `python -m pytest tests/test_full_release.py -q` passed (5 tests).
+- Generated `dist/full_release_no_pdf_v1/full_release_no_pdf_v1.zip` (467,144,742 bytes) and independently extracted and verified it: 28 checksums, 43,343 chunks/vectors, 559 paper IDs, and 1,024 dimensions.
+- Nothing has been uploaded. `github_owner` must be set to the real GitHub owner before using the downloader.
+
+## 2026-06-29（追加功能）打包/校验脚本支持命令行路径覆盖 + 本地自检
+
+- 用户在真实机器上用 `python scripts/package_full_release.py --output ...` 和 `python scripts/verify_full_release.py --artifact_dir ...` 这样的命令行参数尝试自定义输出/校验路径，但两个脚本当时都没有 `argparse`，这些参数被静默忽略（Python 不读取未使用的 `sys.argv`，也不会报错）。打包本身是成功的（28 个文件、43343 chunk、559 唯一 paper_id、单个 467MB zip 未超过 1.5GB 阈值未分卷），但紧接着的 `verify_full_release.py` 必然失败——因为打包脚本只产出 `dist/full_release_no_pdf_v1/full_release_no_pdf_v1.zip`，从未自动解压到 `artifact_dir`，而 `verify_full_release.py` 默认校验的正是 `artifact_dir`（即 `artifacts/full_release_no_pdf_v1/`，本地从未解压过，必然报"未找到"）。这不是 bug，是两个脚本本来的职责分工：打包脚本只产出待上传的发布物，真正的"下载并解压后校验"流程由 `download_full_release.py` 完成；但用户在本地上传前想先自检，原设计缺一个便捷入口。
+- 现在两个脚本都补上了真正的 `argparse`：
+  - `package_full_release.py` 新增 `--output <dir>`（覆盖 `local_dist_dir`）和 `--extract-local`（若未分卷，打包后就地解压到 `artifact_dir`，方便立即本地校验，内部实现为 `extract_for_local_verify()`；若已分卷则打印提示改用 `download_full_release.py`，不强行处理分卷合并）。
+  - `verify_full_release.py` 新增 `--artifact_dir <dir>`（覆盖默认校验目录，自动按 `artifact_dir/data/chunks/full_chunks.jsonl` 和 `artifact_dir/vector_store/chroma_full` 的相对结构重新拼接 chunks/Chroma 路径，而不是继续套用配置文件里写死的默认路径）。
+- 沙箱内用真实命令行参数重新验证（用合成 fixture，文件名已对齐为 `full_paper_inventory.csv`/`full_defect_cards.jsonl`/`full_parameter_cards.jsonl`）：`--output dist/custom_loc` 确认 zip 落到自定义目录；`--extract-local` 打包后自动解压、随后默认 `verify_full_release.py`（无参数）直接 PASS（三项校验全部通过）；`verify_full_release.py --artifact_dir <自定义解压目录>` 同样 PASS。三个场景均按预期工作。
+- 用户当前实际可执行的下一步（针对他刚才报告的 467MB 单个 zip、未分卷的真实打包结果）：直接重新运行 `python scripts/package_full_release.py --extract-local`，会重新打包并自动解压到 `artifacts/full_release_no_pdf_v1/`，再运行 `python scripts/verify_full_release.py`（不需要任何参数）即可看到三项校验结果。
+
+## 2026-06-29（追加修复）GitHub Release 打包脚本源文件名修复
+
+- 用户在真实机器上运行 `python scripts/package_full_release.py` 时报错"源文件/目录缺失"，缺失项之一是 `data/metadata/paper_metadata.csv`。排查后发现这是 `package_full_release.py` 自身的命名 bug，不是语料未构建：
+  - `SOURCE_FILES` 之前写的是占位文件名 `data/metadata/paper_metadata.csv`、`data/processed/defect_cards.jsonl`、`data/processed/parameter_cards.jsonl`，但 `scripts/run_ingest_full.py`（`FullIngestPaths`）实际产出的文件名是 `data/metadata/full_paper_inventory.csv`、`data/processed/full_defect_cards.jsonl`、`data/processed/full_parameter_cards.jsonl`（均带 `full_` 前缀，且没有 `paper_metadata.csv` 这个名字）。
+  - 已修复 `scripts/package_full_release.py` 的 `SOURCE_FILES` 元组与模块 docstring，改为指向这三个真实文件名；`data/chunks/full_chunks.jsonl`、`data/processed/full_paper_cards.jsonl`、`vector_store/chroma_full/` 三项命名本来就正确，未改动。
+- 同时确认（未改动，仅记录）：用户机器上 `data/chunks/full_chunks.jsonl` 与四个 `full_*_cards.jsonl` 目前是 0 字节占位（时间戳统一为构建中断的某一时刻），但 `data/interim/full_parsed_docs.jsonl`、`data/processed/full_cleaned_sections.jsonl`、`data/metadata/full_paper_inventory.csv`（896 篇）等中间产物完整存在，说明 PDF 解析/清洗阶段已完成，只是卡片抽取/分块阶段的输出被清空或未跑完；`vector_store/chroma_full` 是指向项目外 `E:\AI_Vector_Stores\...` 的 Windows 目录联接（junction），在当前挂载视图下不可读，需要在真实 Windows 机器上确认该联接目标是否还存在。
+- 建议的真实机器修复顺序：`python scripts/run_ingest_full.py --resume`（应可跳过已完成的解析/清洗阶段，只重跑卡片抽取与分块）→ 确认 4 个 `full_*` 文件不再是 0 字节 → 确认 `vector_store/chroma_full` 联接可访问（或重新运行 `python scripts/run_build_index.py --corpus_mode full --reset` 重建）→ 重新运行 `python scripts/package_full_release.py`。
+
+## 2026-06-29 GitHub Release 数据包方案（full_release_no_pdf_v1，单一固定方案）
+
+- 方案固定为 `full_release_no_pdf_v1`，不做多方案分支（区别于 `configs/corpus_config.yaml` 现有的 `dev`/`selected`/`full`/`public_sample`/`public_full_artifact`/`upload_only` 多模式矩阵——本次新增的三个脚本只服务这一个固定方案，没有 `--mode` 之类的分支参数）。
+- 新增 `configs/artifact_config.yaml`：固定字段 `artifact_name`/`artifact_source`/`github_owner`（占位，需替换为真实用户名）/`github_repo`/`release_tag`/`artifact_dir`/`chunks_path`/`vector_persist_dir`/`collection_name`，外加打包脚本需要的辅助字段 `max_volume_size_mb`（默认 1500）/`release_manifest_dir`/`local_dist_dir`。`chunks_path`/`vector_persist_dir` 是解压后的**目标**路径（`artifacts/full_release_no_pdf_v1/data/chunks/full_chunks.jsonl` 等），不是打包时的源路径。
+- 新增 `scripts/package_full_release.py`：
+  - 只打包固定的 8 项内容：`data/chunks/full_chunks.jsonl`、`data/metadata/paper_metadata.csv`、`data/processed/full_paper_cards.jsonl`、`data/processed/defect_cards.jsonl`、`data/processed/parameter_cards.jsonl`、`vector_store/chroma_full/`，以及脚本自己生成的 `release_manifest/MANIFEST.json`、`release_manifest/SHA256SUMS.txt`。
+  - 任何源路径（文件名或目录名）包含 `raw_papers` 子串会被 `_assert_not_forbidden()` 拒绝，作为防止 PDF 原文意外混入打包的硬性兜底（需求 #3）。
+  - 若必需的源文件/目录缺失（例如全量语料尚未构建完成），`collect_source_files()` 收集全部缺失项后一次性抛出 `FileNotFoundError`，打印清晰的中文错误列表并以退出码 1 终止，不会打印任何论文/chunk 全文（需求 #7）。
+  - `split_if_needed()` 按 `max_volume_size_mb`（先乘以 1024*1024 再 `int()` 截断，避免对 <1 的小数值截断成 0 导致源 zip 被静默删除却不产生任何分卷——这是沙箱测试中发现并修复的真实 bug）切分超限的 zip 为 `full_release_no_pdf_v1.zip.001/.002/.003/...`；`max_volume_size_mb<=0` 时显式抛 `ValueError` 并保留原始 zip 不被破坏。
+  - 只输出统计信息：打包文件数、源数据总字节数、chunk 数量、唯一 `paper_id` 数量、各分卷文件名与字节数。
+- 新增 `scripts/verify_full_release.py`：按 `release_manifest/SHA256SUMS.txt` 逐文件校验 SHA256、校验 `full_chunks.jsonl` 每行是否为合法 JSON 并统计 chunk 数与唯一 `paper_id` 数、用 `chromadb.PersistentClient` 打开 Chroma collection 并报告条目数；三项校验独立报告通过/失败，全部通过才返回退出码 0，全程只打印统计与错误摘要。
+- 新增 `scripts/download_full_release.py`：从 `configs/artifact_config.yaml` 读取 `github_owner`/`github_repo`/`release_tag`，优先用 GitHub API 列出 Release 资产并按 `.zip.NNN` 数字后缀排序下载；API 不可用时降级为按约定命名顺序直接尝试 `https://github.com/{owner}/{repo}/releases/download/{tag}/{filename}`，连续失败即停止并提示手动下载（不会无限重试或崩溃）；下载完成后合并分卷为单个 zip、解压到 `artifact_dir`，并以模块方式调用 `verify_full_release.main()` 自动校验，返回码与校验结果一致。
+- 更新 `.gitignore`：新增 `!artifacts/README.md`（在已有的 `artifacts/` 整体忽略规则基础上显式保留说明文件）以及 `artifacts/full_release_no_pdf_v1/`、`full_release_no_pdf_v1.zip`、`full_release_no_pdf_v1.zip.*`、`dist/full_release_no_pdf_v1/`、`dist/download_staging/`、`release_manifest/` 等生成产物的忽略规则。
+- 新增 `artifacts/README.md`：说明该目录用途、如何运行 `download_full_release.py`/`verify_full_release.py`，以及为何这一个文件被排除在 `artifacts/` 的忽略规则之外。
+- 验证（沙箱内构造最小合成数据，未触碰 `data/raw_papers/` 真实 896 篇 PDF）：
+  - 用合成的 `full_chunks.jsonl`（3 行）、`paper_metadata.csv`、`full_paper_cards.jsonl`、`defect_cards.jsonl`、`parameter_cards.jsonl` 和真实构建的最小 Chroma collection（2 条向量）跑通 打包 → 解压 → 校验 全流程，三项校验（SHA256/chunks/Chroma）均 PASS。
+  - 解析打包出的 zip 内容列表，确认混入的 `data/raw_papers/should_not_be_packaged.pdf` 没有出现在任何分卷中（PDF 排除生效）。
+  - 故意删除 `data/metadata/paper_metadata.csv` 后运行打包脚本，确认以退出码 1 终止并打印缺失文件清单，不崩溃、不打印全文。
+  - 用 ~14MB 的合成 chunks（高熵文本，避免压缩失真）配合 `max_volume_size_mb=1` 触发真实分卷，产出 7 个 `.001`-`.007` 卷；用 `download_full_release.py` 的 `merge_volumes`/`extract_zip`/`run_verification` 逐一验证合并、解压、校验全部成功。
+  - 在测试中发现并修复了 `split_if_needed()` 对极小 `max_volume_size_mb`（如 0.005）的整数截断 bug（修复前会截断为 0 字节读取块，导致源 zip 被删除且不产生任何分卷文件）；修复后该配置值改为先乘以字节换算再截断，并对 `<=0` 显式报错而非静默丢数据。
+  - 验证 `download_full_release.py` 在指向占位 `github_owner`（尚未替换为真实用户名）时会优雅降级：GitHub API 调用失败后自动尝试直接下载 URL，最终因资产不存在而以退出码 1 终止，并打印手动下载指引，无未捕获异常。
+- 已知限制（有意简化）：`github_owner` 在 `configs/artifact_config.yaml` 中仍是占位符 `YOUR_GITHUB_USERNAME`，需要在真正发布 Release 之前手动替换；`package_full_release.py` 目前要求 `data/processed/full_paper_cards.jsonl` 已经由全量语料构建流程生成，而当前项目这一文件仍是 0 字节占位（全量 Chroma 索引与全量知识卡构建是 `NEXT_TASK.md` 中另一项尚未完成的前置工作），打包脚本会在源文件为空目录/缺失时直接报错退出，不会用 30 篇开发集数据掺假替代。
+
+## 2026-06-29 Long-Conversation Rolling Summarization
+
+- Added `src/agent/conversation_summarizer.py`: a citation-gated, rule-based-first rolling summarizer.
+  - `should_trigger_summary(turns, max_turns=8, token_threshold=1400)`：当 in-memory turns 数量超过 8 轮，或全部 turn 文本的 `estimate_tokens()`（复用 `context_manager.py` 现有实现，不重复造轮子）超过 1400 时返回 `True`。
+  - `ConversationSummary` dataclass：`user_goal`/`confirmed_materials`/`confirmed_defects`/`confirmed_parameters`/`cited_papers`/`open_questions`/`human_review_items`，与需求字段一一对应；有 `to_dict()`/`from_dict()`。
+  - `rule_summarize_turns(turns, previous_summary=None)`：确定性规则摘要，是 `confirmed_*`/`cited_papers`/`human_review_items` 的唯一写入路径——**只有同一轮 turn 同时带 `cited_paper_ids` 时，该轮的 material/defect_type/parameters 才会被提升进 `confirmed_*`**；没有引用支持的实体绝不写入 confirmed 字段，对应的问题改记入 `open_questions`（满足需求 #4，且这是结构性保证，不依赖对 LLM 输出做 schema 校验）。
+  - `summarize_turns(turns, previous_summary, llm_client=None)`：先无条件跑 `rule_summarize_turns`；若提供了实现 `SummarizerLLMClient.generate(system_prompt, user_prompt)` 协议（结构化类型，兼容 `answer_generator.py` 里的 `OllamaClient`）的本地 LLM，**只允许它改写 `user_goal` 一句话**，任何异常或本地 LLM 不可用都直接保留规则摘要结果不变（满足需求 #5 的 fallback，无需特判"LLM 不可用"这一条件分支）。
+  - `maybe_compress_turns(turns, previous_summary, recent_keep=4, ...)`：触发后把除最近 `recent_keep` 轮之外的所有轮次摘要进 `previous_summary`（增量合并，不是从零重算），返回 `(kept_turns, new_summary, triggered)`。
+- 更新 `src/agent/conversation_state.py`：
+  - `DEFAULT_MAX_TURNS` 由 6 提升到 20（仅作为兜底硬上限——新的摘要触发条件 `>8` 轮需要在这个上限造成数据丢失之前先生效）。
+  - `ConversationTurn` 新增 `need_human_review: bool = False`、`review_reason: str = ""` 两个有默认值的字段，`to_dict()`/`from_dict()` 同步更新且对旧版（无这两个字段）的 JSONL 行向后兼容。
+  - `ConversationState.__init__` 新增 `recent_turns_after_summary`/`summary_trigger_turns`/`summary_token_threshold`/`summarizer_llm_client` 参数，新增 `self.summary: ConversationSummary | None`。
+  - `add_turn()` 新增 `need_human_review`/`review_reason` 参数；在原有"追加 → 按 max_turns 裁剪 → 持久化"流程后调用新的 `_maybe_compress()`，触发时把 `self.turns`/`self.summary` 替换为压缩结果，从而让超长对话退化为"summary + recent_turns"而不是被硬裁剪静默丢弃（满足需求 #6）。
+  - `clear()` 同时重置 `self.summary = None`；新增 `summary_dict()` 辅助方法。
+- 更新 `src/app/streamlit_app.py`：侧边栏新增"显示对话摘要" toggle（`show_summary`），勾选后用 `st.expander` + `st.json(conversation.summary_dict())` 展示当前摘要，未触发摘要时显示提示文案；`add_turn()` 调用处新增传入 `need_human_review=bool(result.get("need_human_review"))` 和从 `result.get("review_reasons")`/`limitations` 拼接的 `review_reason`（满足需求 #7）。
+- 新增 `tests/test_conversation_summarizer.py`（9 项），覆盖：按轮数/按 token 触发摘要的正反两面、**核心需求 #4 验证**——有引用的轮次实体进入 `confirmed_*` 而无引用的轮次实体绝不进入（改记 open_questions）、`need_human_review` 轮次被收进 `human_review_items`、与已有摘要的增量合并、**核心需求 #8 验证**——12 轮长对话后 `state.summary is not None`、in-memory `turns` 数量始终不超过 `summary_trigger_turns`、`recent_turns` 是对话尾部连续片段且不含早期轮次的原文、早期轮次的引用确实流入了摘要的 `cited_papers`、`clear()` 后摘要被重置。
+- 验证：沙箱副本中 `pytest tests/test_conversation_summarizer.py`（9/9 通过）与 `pytest tests/test_conversation_state.py`（10/10 通过，未受字段扩展/`DEFAULT_MAX_TURNS` 改动影响）；排除环境缺少 `fitz` 的 `test_parse_papers.py`/`test_run_ingest_full.py` 与既有的 `scan_papers.py` f-string 语法问题后，全量套件 111/112 通过，唯一失败 `test_pipeline_scripts.py::test_index_pipeline_prefers_configured_local_model` 是 Windows 路径分隔符在 Linux 沙箱下的既有环境差异，与本次改动无关。
+- 已知限制（有意简化，未实现）：`ConversationState.load()` 从磁盘重建会话时不会重新触发摘要压缩——重新加载后只会按 `max_turns` 截断原始 turns，`summary` 为空；这是范围内的取舍，需求未要求跨进程重启后的摘要持久化。
+
+## 2026-06-29 Context Manager (Priority-Ordered, Token-Budgeted Prompt Assembly)
+
+- Added `src/agent/context_manager.py`: `build_llm_context(current_query, query_info, conversation_history, conversation_summary, reranked_evidence, token_budget=3200, top_n_evidence=6, recent_turns_window=3)` returns a `ManagedContext(llm_context, context_debug)`.
+- `llm_context` exposes exactly six keys: `system_instruction`（复用 `src/rag/prompts.py` 的 `SYSTEM_PROMPT`）、`conversation_summary`、`recent_turns`、`current_query`、`evidence_table`、`risk_rules`。
+- 优先级策略：current_query/system_instruction/risk_rules 始终保留；evidence 一次性截断为 `top_n_evidence`（取值范围 5-8，越界自动 clamp）后永不再删；超出 `token_budget` 时先丢弃最近对话轮（从保留窗口最旧的一轮开始），再压缩 `conversation_summary`（按 70% 比例迭代收缩，下限 40 字符），最后才整段丢弃摘要——evidence 始终不受影响。
+- 每条 evidence 只保留 `evidence_id`/`paper_id`/`title`/`section_name`/`chunk_type`/压缩后的 `text`（`text_preview`/`evidence_text`/`matched_text` 取第一个非空值，截断到 320 字符并加 `…`），不写入过长全文。
+- `context_debug` 记录：`token_budget`、`estimated_tokens_used`、`over_budget`、`evidence_kept_ids`/`evidence_dropped_ids`、`recent_turns_kept_indices`/`recent_turns_dropped_indices`、`older_turns_excluded_indices`、`conversation_summary_compressed`、`conversation_summary_dropped`，可直接审计每一步删了什么、留了什么。
+- `render_prompt(llm_context, query_info=None)` 把结构化 `llm_context` 拼成最终用户 prompt 文本（摘要 → 最近对话 → 当前问题 → 结构化 query → evidence 表 → 风险规则 → 中文/`[E编号]` 引用要求）。
+- 修改 `src/rag/answer_generator.py`：`AnswerGenerator.generate()` 新增可选参数 `conversation_history`、`conversation_summary`、`token_budget`、`top_n_evidence`（均有默认值，原有 3 个位置参数调用方式不受影响）；prompt 构造统一改为 `build_llm_context()` + `render_prompt()`，不再使用 `src.rag.prompts.build_answer_prompt()` 直接拼接；`GeneratedAnswer` 新增 `context_debug` 字段，便于上层（如 Streamlit 调试面板）展示裁剪过程。
+- 新增 `tests/test_context_manager.py`（13 项），覆盖：必需字段集合、空 query/非正 token_budget 报错、evidence 默认截断到 6 条、top_n_evidence 越界 clamp 到 [5,8]、evidence 文本压缩不超 320 字符且不等于原文、最近对话窗口排除更早历史、高风险规则按需追加、极小 token_budget 下证据保持不变而历史被裁剪（核心回归测试）、宽松预算下无任何裁剪、`ManagedContext.to_dict()` 结构、`render_prompt()` 内容覆盖、`estimate_tokens()` 单调性。
+- 验证：在隔离的 sandbox 副本中运行 `pytest tests/test_context_manager.py tests/test_rag_answer.py tests/test_conversation_state.py tests/test_streamlit_app.py -q`，31/31 通过；扩大到全量套件（跳过环境缺少 `fitz`/PyMuPDF 的 `test_parse_papers.py`、`test_run_ingest_full.py`，以及沙箱 Python 3.10 下 `scan_papers.py` 一处 f-string 反斜杠语法在 3.12 才支持、与本次改动无关的既有问题）后 102/103 通过；唯一失败 `test_pipeline_scripts.py::test_index_pipeline_prefers_configured_local_model` 是 Windows 路径 `E:\AI_Models\...` 在 Linux 沙箱下的路径分隔符差异，与本次 context_manager/answer_generator 改动无关。
+- 未改动：`src/rag/prompts.py` 的 `SYSTEM_PROMPT`/`build_answer_prompt`（后者仍被 `src/langchain_adapters/prompts.py` 使用）；`src/agent/workflow.py` 中 `AgentWorkflow.generate_answer()` 的 3-位置参数调用方式无需修改即可继续工作。
+
+## 2026-06-29 Streamlit Short-Term Conversation Memory
+
+- Added `src/agent/conversation_state.py`: `ConversationState` keeps the most recent `max_turns` turns (default 6) per session and persists every turn as one JSONL line under `data/runtime/conversations/<conversation_id>.jsonl`; `data/runtime/` is already covered by `.gitignore` (no change needed).
+- Each stored turn keeps only `user_question`, a short `system_answer_brief`, extracted `key_entities` (defect_type/material/parameters/quality_metric), and up to 5 `cited_paper_ids` — never raw retrieval evidence or full paper text. Question/answer text is sanitized through the existing `sanitize_text()` from `src/agent/memory.py`.
+- Added `resolve_followup_query(question, history)`: when a question contains a follow-up marker (那/这个/这种/它/该/此/上述/上面/刚才/之前/继续/呢) and omits an entity category, it fills that category from the most recent turn's entities while leaving explicitly stated entities untouched; otherwise falls back to the plain `rewrite_query()`.
+- `src/app/streamlit_app.py`: each session now creates a `conversation_id` and a `ConversationState` in `st.session_state`; `execute_mode()` uses `resolve_followup_query()` once a conversation has turns; a new sidebar "对话记忆" section shows the current turn count and a "清空当前对话记忆" button that clears in-memory turns and deletes the on-disk JSONL.
+- Added `tests/test_conversation_state.py` (10 tests): JSONL persistence + in-memory trimming, evidence-text exclusion, clear/delete, reload-from-disk, follow-up marker detection, and the core two-turn case ("保压压力对翘曲有什么影响？" then "那对缩水呢？" correctly inherits `parameters=["packing_pressure"]`), plus explicit-entity-override and no-marker/no-history fallback cases.
+- Verified `python3 -m py_compile src/app/streamlit_app.py src/agent/conversation_state.py` and `pytest tests/test_conversation_state.py` (10/10 passed) in a clean sandbox copy. `tests/test_streamlit_app.py` ran 21/22 passing against the same copy; the one failure (`test_retrieval_stats_hide_absolute_persist_path`) is pre-existing and unrelated — it depends on real `vector_store/chroma` + `data/chunks/chunks.jsonl` artifacts that exist on the real machine but were not reproduced in the throwaway sandbox copy used for verification.
+- **Bugfix (same day):** the conversation-resolved rewrite from `resolve_followup_query()` was only being attached to `result["query_rewrite"]` for display — `AgentWorkflow`/`LangGraphWorkflow` (普通 RAG) independently recompute a plain, history-blind `rewrite_query(question)` internally, and `run_defect_diagnosis`/`run_method_compare`/`run_retrieval_debug` were all searching with the raw `question` text. So a follow-up like "那对缩水呢？" never actually changed what got retrieved, only what showed up in the "Query Rewrite" debug panel.
+- Fixed by: (1) `run_normal_rag` now accepts the precomputed `rewrite` dict and injects it via a fixed `rewriter` callable into both `AgentWorkflow(rewriter=...)` and `LangGraphWorkflow(rewriter=...)` (both already supported this constructor parameter), so `state.normalized_query` — the actual retrieval query — carries the resolved entities; (2) `run_defect_diagnosis`, `run_method_compare`, and `run_retrieval_debug` now search with `rewrite.get("normalized_query") or question` instead of the raw question text; (3) `execute_mode` passes the resolved `rewritten` dict through to all four mode handlers.
+- Verified with a scripted smoke test: two-turn conversation ("保压压力对翘曲有什么影响？" then "那对缩水呢？") confirms the literal retrieval query sent to the search layer is `"那对缩水呢 sink_mark/shrinkage packing_pressure"` — i.e. the inherited `packing_pressure` parameter now reaches retrieval, not just the debug display. Full test suite re-run after the fix: same 21/22 result (`test_conversation_state.py` 10/10, `test_streamlit_app.py` 21/22 with the one pre-existing/unrelated environment-only failure noted above).
+
+## 2026-06-29 LangGraph Workflow Backend
+
+- Added a parallel LangGraph workflow while preserving `src/agent/workflow.py` as the classic backend.
+- The graph includes query rewrite, retrieval, reranking, answer generation, citation guard, risk check, memory update, and human review nodes.
+- Conditional routing sends insufficient evidence to human review, citation failures to one optional revision or human review, and safe answers to memory update and completion.
+- The graph uses a configurable recursion limit (`max_steps`, default 12) and a bounded revision count.
+- Streamlit now exposes `workflow_backend=classic/langgraph`; classic remains the default.
+- LangGraph tests use only mock retrieval, mock LLM, mock memory, and mock review tools; no real full-corpus index is opened.
+- Test status: `.venv/Scripts/python.exe -m pytest -q` passed with 82 tests.
+
+## 2026-06-29 LangChain Adapter Layer
+
+- Added a thin `src/langchain_adapters` layer without replacing the existing retrieval, RAG, or Streamlit paths.
+- Hybrid retrieval now has an optional LangChain `BaseRetriever` adapter with `invoke()` and `get_relevant_documents()` interfaces.
+- Retrieval results convert to LangChain `Document` objects with paper, title, section, score, and chunk metadata.
+- The prompt adapter reuses the existing `SYSTEM_PROMPT` and `build_answer_prompt()` implementation, preserving answer instructions and citation format.
+- The local Ollama adapter implements the LangChain Runnable interface and retains an offline mock fallback.
+- Added LangChain, Core, Community, text-splitter, and Chroma integration dependencies to `requirements.txt` and installed them in `.venv`.
+- Real full-corpus smoke passed through Hybrid retrieval -> Document -> prompt -> mock LLM.
+- Test status: `.venv/Scripts/python.exe -m pytest -q` passed with 78 tests.
+
+## 2026-06-29 Full Corpus Retrieval Regression
+
+- Added 20 smoke questions covering packing pressure, warpage, shrinkage, weld lines, transparent-part haze, quality prediction, machine learning, optimization, and knowledge graphs.
+- Compared Hybrid + rule-rerank top-10 retrieval against the independent dev and full Chroma collections.
+- All 40 mode/query runs completed successfully.
+- Across the 20 questions, dev retrieved 24 aggregate unique paper IDs and full retrieved 111.
+- Mean unique papers per query increased from 5.50 (dev) to 7.90 (full); full was higher on 17 questions, tied on 2, and lower on 1.
+- The result confirms that full mode retrieves from a substantially broader paper set, while not claiming that every full result is more relevant.
+- Outputs: `data/eval/dev_vs_full_retrieval_compare.csv` and `data/eval/full_corpus_validation_report.md`.
+
+## 2026-06-28 Full Chroma Index Completed
+
+- Built an independent full-mode Chroma index from the current `data/chunks/full_chunks.jsonl`.
+- Full collection: `injection_papers_full` at `vector_store/chroma_full`.
+- `vector_store/chroma_full` is a junction to `E:/AI_Vector_Stores/injection_molding_rag_agent/chroma_full`; the existing dev junction was preserved.
+- Embedding backend/model: `sentence-transformers` with local `E:/AI_Models/BAAI/bge-m3`.
+- Embedding dimension: 1024; batch size: 8; build time: 19,062.09 seconds.
+- Current full chunks: 43,343; current full vectors: 43,343; Chroma/chunks consistency: true.
+- Current full chunks and Chroma contain 559 unique `paper_id` values. The raw directory contains 896 PDFs, so the current full artifact is an audited raw-paper subset rather than complete 896-paper coverage.
+- Full build report: `data/logs/full_index_report.md`.
+- Full audit outputs: `data/logs/corpus_audit_full_report.md` and `data/logs/corpus_audit_full_stats.csv`.
+- The dev index remains unchanged at 1,864 vectors in collection `injection_molding_chunks`.
+- `src/index/audit_corpus.py` now pages Chroma metadata reads, avoiding SQLite variable limits on full collections.
+- Test status: `python -m pytest -q` passed with 72 tests.
+
+## 2026-06-28 Full Corpus Ingest Completed
+
+- Added `scripts/run_ingest_full.py` with `scan -> parse -> clean -> extract_paper_cards -> build_chunks` orchestration.
+- Supports `--limit`, `--resume`, `--force`, and `--workers` (default 2, maximum 8).
+- PDF parsing uses one atomic JSONL part per paper under `data/interim/full_parsed_parts`; completed papers are skipped on resume.
+- Existing monolithic parsed output was validated by page count and migrated into resumable parts instead of being discarded.
+- The 10-paper smoke run passed: 10 papers, 0 failures, 88 sections, and 749 chunks.
+- Full run passed: 896 papers, 0 parse failures, 14,898 pages, 7,505 sections, and 71,307 chunks.
+- Full knowledge cards: 896 paper cards, 1,484 defect cards, 1,197 method cards, and 2,545 parameter cards.
+- `data/chunks/full_chunks.jsonl` is about 81 MB and contains 896 unique `paper_id` values.
+- Full ingest report: `data/logs/full_ingest_report.md`.
+- Full audit now reports chunks ready and Chroma missing, as expected before full-index construction.
+- `configs/corpus_config.yaml` full mode correctly points to `data/chunks/full_chunks.jsonl`, `vector_store/chroma_full`, and `injection_papers_full`.
+- The default Streamlit mode was not switched; the verified dev fallback remains active until the full vector index is built.
+- Test status: `python -m pytest -q` passed with 72 tests.
+
+## 2026-06-28 Corpus Audit `--mode` Fix
+
+- `src/index/audit_corpus.py` now supports `--mode` for all six corpus modes.
+- Explicit `--chunks`, `--persist_dir`, and `--collection` values override the selected mode field by field.
+- No-argument audit still inspects the currently runnable dev fallback baseline.
+- Explicit mode audits use the mode's configured target paths, without silently switching to the legacy fallback.
+- Missing chunks, persist directories, or collections no longer crash the audit; Markdown and CSV outputs mark them as `未构建/缺失`.
+- Default outputs are mode-specific: `data/logs/corpus_audit_<mode>_report.md` and `data/logs/corpus_audit_<mode>_stats.csv`.
+- Verified `audit_corpus --help`, no-argument audit, `--mode dev`, and `--mode full`.
+- Current default dev fallback remains ready: 30 papers, 1,864 chunks, and 1,864 vectors.
+- Preferred `dev` and `full` mode targets are currently reported as not built.
+- Streamlit sidebar now displays corpus mode, chunks path, collection, paper count, chunk count, and vector count.
+- Test status: `python -m pytest -q` passed with 70 tests.
+
+## 2026-06-28 Corpus Mode Configuration
+
+- Added `configs/corpus_config.yaml` with six modes: `dev`, `selected`, `full`, `public_sample`, `public_full_artifact`, and `upload_only`.
+- Added `src/config.py` with validated `load_corpus_config()` and optional `CORPUS_MODE` environment override.
+- App, BM25, Dense, Hybrid defaults, retrieval debug, corpus audit, chunk building, vector-index building, and index inspection now use the unified corpus configuration.
+- Each mode has independent chunks, vector-store, collection, source-paper, upload-policy, and public-demo settings.
+- The preferred dev targets are `data/chunks/dev_chunks.jsonl`, `vector_store/chroma_dev`, and `injection_molding_dev`.
+- Until those preferred dev artifacts are built, dev mode automatically uses the verified legacy baseline: `data/chunks/chunks.jsonl`, `vector_store/chroma`, and `injection_molding_chunks`.
+- Streamlit sidebar now displays corpus mode, chunks path, collection name, paper count, and chunk count.
+- Browser verification passed with dev fallback: 30 papers, 1,864 chunks, and all local components ready.
+- Command-line BM25, Dense, and Hybrid retrieval remain operational.
+- Test status: `python -m pytest -q` passed with 67 tests.
+
+## 2026-06-28 Active Corpus Audit
+
+- Added `src/index/audit_corpus.py` and audited the effective Streamlit retrieval data sources.
+- Streamlit/BM25 currently uses `data/chunks/chunks.jsonl`; neither `chunks_path` nor `corpus_mode` is explicitly configured in YAML.
+- Active chunks: 1,864 records and 30 unique `paper_id` values.
+- Active Chroma: `vector_store/chroma`, collection `injection_molding_chunks`, 1,864 vectors and 30 unique metadata `paper_id` values.
+- Chunks and Chroma counts, paper-ID sets, and chunk-ID multisets are fully consistent.
+- Source attribution is conclusive: the 30 chunk file names exactly match the 30 PDFs in `data/dev_papers`.
+- The active App does not currently use the 100-paper selected set or the full raw directory.
+- Current source directories contain 30 dev PDFs, 100 selected PDFs, and 896 raw PDFs.
+- Reports: `data/logs/corpus_audit_report.md` and `data/logs/corpus_audit_stats.csv`.
+- No PDF full text was read for source attribution.
+
+## 2026-06-28 Full Artifact Packaging Design
+
+- Added `scripts/package_full_artifact.py` for packaging `data/raw_papers`, `data/metadata`, `data/chunks`, and `vector_store` with ZIP64, per-file SHA-256, a content manifest, and optional 1,900 MB release parts.
+- Added `scripts/verify_full_artifact.py` for verifying a complete ZIP, a local split-parts descriptor, or an extracted installation.
+- Added `scripts/download_full_artifact.py` for direct or multipart downloads, checksum verification, safe extraction, and post-extraction verification.
+- Current package preflight expectation is 896 PDFs; packaging requires explicit `--confirm_publication_rights yes`.
+- Confirmed the packager can traverse the existing Chroma junction: 42 vector-store files, about 48.85 MB.
+- Updated README with packaging, verification, download, hosting, and redistribution-rights guidance.
+- No full artifact archive was generated and no paper or vector-store data was added to Git.
+- Test status: `python -m pytest -q` passed with 63 tests.
+
 ## 2026-06-28 Runnable-Version Checkpoint
 
 - The current Streamlit system is runnable at `http://127.0.0.1:8501/`.

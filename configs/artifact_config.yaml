@@ -1,0 +1,9 @@
+artifact_name: full_release_no_pdf_v1
+artifact_source: github_release
+github_owner: JamaicaBoy
+github_repo: injection-molding-rag-agent
+release_tag: full-release-v1
+artifact_dir: artifacts/full_release_no_pdf_v1
+chunks_path: artifacts/full_release_no_pdf_v1/data/chunks/full_chunks.jsonl
+vector_persist_dir: artifacts/full_release_no_pdf_v1/vector_store/chroma_full
+collection_name: injection_papers_full

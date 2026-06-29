@@ -3,6 +3,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.eval.compare_corpus_retrieval import run_comparison
 from src.eval.eval_generation import run_generation_evaluation
 from src.eval.eval_retrieval import run_retrieval_evaluation
 from src.rag.answer_generator import AnswerGenerator
@@ -76,3 +77,73 @@ def test_retrieval_and_generation_evaluators_write_csv(tmp_path: Path) -> None:
     assert generation.loc[0, "evidence_count"] == 1
     assert generation.loc[0, "citation_guard_passed"] == 1
 
+
+def test_dev_vs_full_comparison_writes_required_outputs(tmp_path: Path) -> None:
+    input_path = tmp_path / "full_smoke.csv"
+    output_path = tmp_path / "compare.csv"
+    report_path = tmp_path / "report.md"
+    pd.DataFrame(
+        [
+            {"query": "保压压力有什么影响？", "category": "保压压力"},
+            {"query": "如何预测翘曲？", "category": "翘曲"},
+        ]
+    ).to_csv(input_path, index=False, encoding="utf-8")
+
+    def dev_search(query: str, top_k: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "paper_id": "paper_dev",
+                "title": "Dev paper",
+                "section_name": "Results",
+                "score": 0.7,
+            }
+        ][:top_k]
+
+    def full_search(query: str, top_k: int) -> list[dict[str, Any]]:
+        suffix = "pressure" if "保压" in query else "warpage"
+        return [
+            {
+                "paper_id": f"paper_full_{suffix}",
+                "title": f"Full {suffix} paper",
+                "section_name": "Abstract",
+                "rerank_score": 0.8,
+            }
+        ][:top_k]
+
+    stats = {
+        "dev": {
+            "paper_count": 30,
+            "chunk_count": 100,
+            "vector_count": 100,
+            "collection_name": "dev",
+        },
+        "full": {
+            "paper_count": 500,
+            "chunk_count": 1000,
+            "vector_count": 1000,
+            "collection_name": "full",
+        },
+    }
+    result = run_comparison(
+        input_path,
+        output_path,
+        report_path,
+        top_k=10,
+        runners={"dev": dev_search, "full": full_search},
+        corpus_stats=stats,
+    )
+
+    required = {
+        "query",
+        "mode",
+        "top_paper_ids",
+        "unique_paper_count",
+        "top_scores",
+        "top_titles",
+    }
+    assert len(result) == 4
+    assert required.issubset(result.columns)
+    assert output_path.exists()
+    assert "Full 是否在本轮问题累计召回中覆盖更多论文: **是**" in report_path.read_text(
+        encoding="utf-8"
+    )

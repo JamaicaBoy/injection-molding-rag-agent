@@ -1,7 +1,8 @@
 import csv
+import json
 from pathlib import Path
 
-from src.rag.answer_generator import AnswerGenerator
+from src.rag.answer_generator import AnswerGenerator, OllamaClient
 from src.rag.citation_guard import check_citations
 from src.rag.prompts import SYSTEM_PROMPT
 from src.retrieval.query_rewrite import rewrite_query
@@ -25,6 +26,30 @@ def evidence() -> list[dict[str, object]]:
 class UnsupportedClaimClient:
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         return "建议采用 300 MPa，并参考《不存在的论文》。 [E9]"
+
+
+class TransientFailureClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary model memory pressure")
+        return "保压压力可能增加飞边风险。[E1]"
+
+
+class FakeHTTPResponse:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps({"response": "grounded answer [E1]"}).encode("utf-8")
 
 
 def test_prompt_contains_grounding_and_safety_rules() -> None:
@@ -68,6 +93,40 @@ def test_mock_generator_returns_cited_structured_answer(tmp_path: Path) -> None:
     assert result.evidence_list[0]["evidence_id"] == "E1"
     assert result.confidence == "low"
     assert not result.need_human_review
+
+
+def test_ollama_client_limits_context_and_unloads_after_generation(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeHTTPResponse()
+
+    monkeypatch.setattr("src.rag.answer_generator.urllib.request.urlopen", fake_urlopen)
+    client = OllamaClient("qwen2.5:7b", "http://localhost:11434")
+
+    assert client.generate("system", "question") == "grounded answer [E1]"
+    assert captured["payload"]["keep_alive"] == 0
+    assert captured["payload"]["options"]["num_ctx"] == 2048
+
+
+def test_ollama_fallback_is_retried_on_next_generation(tmp_path: Path) -> None:
+    client = TransientFailureClient()
+    generator = AnswerGenerator(
+        mode="ollama",
+        llm_client=client,
+        review_queue=tmp_path / "review.csv",
+    )
+
+    first = generator.generate("保压压力有什么影响？", rewrite_query("保压压力有什么影响？"), evidence())
+    second = generator.generate("保压压力有什么影响？", rewrite_query("保压压力有什么影响？"), evidence())
+
+    assert first.answer.startswith("Mock 模式")
+    assert generator.active_mode == "ollama"
+    assert second.answer == "保压压力可能增加飞边风险。[E1]"
+    assert generator.fallback_reason is None
+    assert client.calls == 2
 
 
 def test_guard_failure_sets_review_and_appends_queue(tmp_path: Path) -> None:

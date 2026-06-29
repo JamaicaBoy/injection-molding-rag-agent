@@ -1,410 +1,561 @@
-# 注塑企业论文知识库 RAG Agent
+# 注塑企业论文知识库 Agent
 
-一个面向注塑成型企业的论文知识库 RAG Agent，用于基于本地学术文献完成注塑工艺问答、缺陷诊断、工艺参数影响分析和论文方法对比。
+一个面向注塑成型企业的 **RAG + Agent 论文知识库应用**。
+
+项目以注塑成型相关学术论文为核心知识来源，支持工艺问答、缺陷诊断、工艺参数影响分析、论文方法对比、证据追溯、对话记忆、用户上传文献增量索引，并通过 LangChain / LangGraph 逐步升级为可扩展的企业级 Agent Workflow。
+
+> 当前状态：基础 RAG Demo 已跑通；本地完整知识库从 dev 30 篇文献升级到 full 896 篇文献；公开 Demo 默认使用 `public_full_release` 数据包，避免在普通 Git 仓库中直接塞入大体积 PDF 和完整向量库。
 
 ---
 
 ## 1. 项目简介
 
-本项目是一个面向注塑企业知识管理与工艺辅助分析的本地化 RAG + Agent 应用。
+**注塑企业论文知识库 Agent** 是一个用于制造业知识管理与工艺辅助分析的本地化 RAG + Agent 项目。
 
-系统以注塑成型相关学术论文为主要知识来源，通过 PDF 解析、文本切分、向量检索、混合检索、重排序和本地大模型问答，实现对论文知识的可追溯检索与回答。
+它不是普通 FAQ 系统，而是面向注塑成型领域论文库构建的工程知识助手。系统能够从本地论文知识库中检索证据，结合大模型生成结构化回答，并在缺陷诊断、参数影响分析、方法对比等业务场景中提供可追溯的辅助判断。
 
-当前本地版本已经完成基础闭环：
+项目适合作为：
 
-- Streamlit 前端已跑通；
-- 本地访问 `localhost:8501` 可正常提问；
-- 知识库可以基于本地文献进行 RAG 问答；
-- 准备首次上传 GitHub；
-- 普通公开仓库暂时只包含代码、配置、文档和少量示例，不直接上传 819 篇论文和完整向量库。
+- 企业内部论文知识库 Demo；
+- 工艺工程师 / 质量工程师辅助检索工具；
+- 注塑缺陷分析与工艺参数影响分析原型；
+- LangChain + LangGraph + 本地知识库工程化实践案例。
 
 ---
 
-## 2. 业务背景
+## 2. 业务痛点
 
-注塑成型企业在生产、研发和质量管理过程中，经常会遇到以下问题：
+注塑企业在研发、试产、量产和质量分析过程中会持续产生大量论文、报告、实验记录和工艺经验，但这些知识往往难以被快速复用。
 
-### 2.1 论文知识分散，难以快速复用
+### 2.1 论文知识分散，检索成本高
 
-注塑成型相关论文数量多，内容涉及材料、模具、工艺参数、缺陷机理、质量预测、优化算法等多个方向。工程师很难在大量 PDF 中快速找到可靠依据。
+注塑成型论文涉及材料、模具、工艺参数、缺陷机理、质量预测、优化算法、仿真建模等多个方向。工程师如果只靠手动翻 PDF，很难在短时间内找到可靠证据。
 
 ### 2.2 缺陷诊断依赖经验，知识沉淀不足
 
-翘曲、缩水、熔接痕、短射、飞边、气泡、烧焦等问题往往与熔体温度、模具温度、注射速度、保压压力、冷却时间等参数有关，但不同论文、材料和工况下结论可能不同。
+翘曲、缩水、熔接痕、短射、飞边、气泡、烧焦、透明件发雾等问题通常与熔体温度、模具温度、注射速度、保压压力、冷却时间等参数相关。但不同材料、模具结构和工况下，论文结论可能存在差异，需要结合证据判断。
 
 ### 2.3 工艺参数影响关系复杂
 
-一个参数可能同时影响尺寸精度、重量、透过率、表面质量和内部缺陷，且不同材料和模具结构下影响方向并不完全一致。
+单个参数可能同时影响重量、尺寸精度、透过率、表面质量、收缩率和内部缺陷。企业需要的不只是“参数升高会怎样”，而是“在哪些论文、哪些材料、哪些质量指标下有证据”。
 
-### 2.4 算法和方法对比困难
+### 2.4 方法调研和算法选型困难
 
-论文中常见机器学习、深度学习、优化算法、知识图谱、仿真优化等方法，但不同方法适用场景、输入数据、优缺点和工程落地难度不同。
+论文中常见机器学习、深度学习、优化算法、知识图谱、仿真优化等方法。工程落地时需要快速比较不同方法的输入数据、适用场景、优缺点和实现难度。
 
-### 2.5 企业需要可追溯的知识问答系统
+### 2.5 工业场景需要可追溯和可复核
 
-在工程场景中，回答不能只给结论，还需要提供引用证据、来源论文、相关段落和置信度判断。对于高风险问题，需要进入人工复核流程。
+生产参数调整、质量放行、设备异常、安全风险等问题不能让大模型直接拍脑袋回答。系统需要提供证据来源、置信度判断和人工复核入口。
 
 ---
 
-## 3. 核心功能
+## 3. 当前进度
 
-### 3.1 RAG 论文问答
+| 模块 | 状态 | 说明 |
+|---|---:|---|
+| Streamlit 基础 Demo | ✅ 已完成 | 本地 `localhost:8501` 可运行 |
+| 基础 RAG 问答 | ✅ 已完成 | 支持基于本地论文 chunk 的问答 |
+| dev 文献库 | ✅ 已完成 | 约 30 篇论文，用于开发调试 |
+| full 本地文献库 | ✅ 已完成 / 计划切换 | 约 896 篇本地论文，用于完整效果 |
+| corpus mode | ✅ 已完成 | 支持 `dev` / `selected` / `full` / `public_full_release` |
+| LangChain adapter | ✅ 已完成 | 将检索、LLM、Prompt、Memory 封装为可替换组件 |
+| LangGraph workflow | ✅ 已完成 | 将 Agent 流程显式建模为状态图 |
+| 短期对话记忆 | ✅ 已完成 | 保存当前会话上下文和最近轮次 |
+| 长对话摘要 | ✅ 已完成 | 长对话自动压缩为摘要，降低上下文压力 |
+| 用户上传 PDF | ✅ 已完成 | 上传后实时解析、chunk、embedding、增量入库 |
+| public full release | ✅ 已完成 | 公开 Demo 固定使用 `public_full_release` |
+| GitHub Release 数据包 | ✅ 已完成 | 发布 `full_release_no_pdf_v1`，不包含 PDF 原文 |
 
-基于本地注塑论文知识库进行问答，回答时优先引用检索到的论文证据，而不是单纯依赖大模型记忆。
+---
+
+## 4. 功能截图占位
+
+> 下列图片为 README 占位。实际发布前可将截图放入 `docs/assets/` 或 `assets/` 目录，并替换路径。
+
+### 4.1 首页与问答界面
+
+![首页与问答界面](docs/assets/screenshot_home_placeholder.png)
+
+### 4.2 RAG 证据检索结果
+
+![RAG 证据检索结果](docs/assets/screenshot_evidence_placeholder.png)
+
+### 4.3 缺陷诊断 Agent
+
+![缺陷诊断 Agent](docs/assets/screenshot_defect_agent_placeholder.png)
+
+### 4.4 文献上传与增量索引
+
+![文献上传与增量索引](docs/assets/screenshot_upload_placeholder.png)
+
+---
+
+## 5. 核心功能
+
+### 5.1 论文知识 RAG 问答
+
+系统根据用户问题从论文 chunk 中检索证据，并生成带来源的回答。
 
 示例问题：
 
-- 注塑件翘曲的主要原因有哪些？
-- 模具温度升高会如何影响透明件质量？
-- 有哪些论文使用机器学习预测注塑产品质量？
+```text
+注塑件翘曲的主要原因有哪些？
+模具温度升高会如何影响透明件质量？
+有哪些论文使用机器学习预测注塑产品质量？
+```
 
----
+### 5.2 缺陷诊断辅助
 
-### 3.2 缺陷诊断辅助
-
-针对常见注塑缺陷，检索相关论文证据并整理可能原因、相关参数和建议排查方向。
+针对常见缺陷，系统检索论文证据，整理可能原因、相关工艺参数、排查方向和风险提示。
 
 覆盖问题包括：
 
-- 翘曲
-- 缩水
-- 熔接痕
-- 短射
-- 飞边
-- 气泡
-- 烧焦
-- 透明件发雾
-- 产品变形严重
+- 翘曲；
+- 缩水；
+- 熔接痕；
+- 短射；
+- 飞边；
+- 气泡；
+- 烧焦；
+- 透明件发雾；
+- 产品变形严重。
 
-注意：系统只提供基于论文证据的候选原因和分析方向，不直接替代现场工程师做最终生产决策。
+> 注意：系统只提供基于论文证据的候选原因和分析方向，不直接替代现场工程师做最终生产决策。
 
----
-
-### 3.3 工艺参数影响分析
+### 5.3 工艺参数影响分析
 
 支持分析单个工艺参数对质量指标或缺陷的影响。
 
-典型参数包括：
+典型参数：
 
-- 熔体温度
-- 模具温度
-- 注射速度
-- 保压压力
-- 保压时间
-- 冷却时间
-- 背压
-- 螺杆转速
+- 熔体温度；
+- 模具温度；
+- 注射速度；
+- 保压压力；
+- 保压时间；
+- 冷却时间；
+- 背压；
+- 螺杆转速。
 
-典型质量指标包括：
+典型质量指标：
 
-- 产品重量
-- 尺寸精度
-- 透过率
-- 表面质量
-- 翘曲变形
-- 收缩率
-- 内部缺陷
+- 产品重量；
+- 尺寸精度；
+- 透过率；
+- 表面质量；
+- 翘曲变形；
+- 收缩率；
+- 内部缺陷。
 
----
+### 5.4 论文方法对比
 
-### 3.4 方法对比
+支持比较论文中的不同方法：
 
-支持对比论文中的不同算法或工艺优化方法，例如：
+- 机器学习；
+- 深度学习；
+- 遗传算法；
+- 粒子群优化；
+- 贝叶斯优化；
+- 知识图谱；
+- 仿真优化；
+- RAG 与传统 FAQ 系统。
 
-- 机器学习方法
-- 深度学习方法
-- 遗传算法
-- 粒子群优化
-- 贝叶斯优化
-- 知识图谱
-- 仿真优化
-- RAG 与传统 FAQ 系统
+系统会从输入数据、适用场景、优点、局限性和工程落地难度等角度输出对比。
 
-系统会从适用场景、输入数据、优点、局限性和工程落地难度等角度整理对比结果。
+### 5.5 引用证据与人工复核
 
----
-
-### 3.5 检索调试
-
-提供检索结果查看和调试能力，用于分析：
-
-- 用户问题被匹配到了哪些 chunk；
-- 检索结果是否包含有效证据；
-- BM25 与向量检索结果是否一致；
-- rerank 后的证据排序是否合理；
-- 回答是否忠实于检索内容。
-
----
-
-### 3.6 引用证据
-
-回答中尽量保留证据来源，包括：
+回答时尽量保留：
 
 - 论文标题；
 - chunk 内容；
 - 相似度分数；
 - rerank 分数；
 - 关键证据段落；
+- metadata；
 - 可能的页码或章节信息。
 
-目标是让用户能够追溯回答依据，而不是只得到一个无法验证的结论。
+对于证据不足、证据冲突、生产参数直接调整、质量放行、设备异常、安全风险等问题，系统会提示人工复核，而不是直接给出强结论。
 
 ---
 
-### 3.7 人工复核
+## 6. Corpus Mode 设计
 
-对于以下场景，系统不会直接给出强结论，而是建议进入人工复核：
+项目支持多种语料模式，方便在开发、展示、本地完整运行和公开 Demo 之间切换。
 
-- 检索证据不足；
-- 多篇论文结论冲突；
-- 问题涉及生产参数直接调整；
-- 问题涉及质量放行；
-- 问题涉及设备异常或安全风险；
-- 问题超出论文知识库范围；
-- 模型置信度较低。
+| 模式 | 用途 | 数据规模 | 是否适合 GitHub 仓库 | 说明 |
+|---|---|---:|---:|---|
+| `dev` | 开发调试 | 约 30 篇 | ✅ 适合 | 速度快，便于调试解析、检索、Prompt |
+| `selected` | 小规模精选演示 | 可配置 | ✅ 可放少量样例 | 适合展示核心功能，不追求完整覆盖 |
+| `full` | 本地完整效果 | 约 896 篇 | ❌ 不建议直接入库 | 本地私有运行，效果最接近完整论文库 |
+| `public_full_release` | 公开 Demo 默认模式 | full 级别产物，不含 PDF | ✅ 通过 Release 分发 | Demo 固定使用该模式，避免普通仓库过大 |
 
----
+推荐策略：
 
-## 4. 技术栈
-
-### 4.1 后端与数据处理
-
-- Python
-- PyMuPDF / PDF 解析工具
-- pandas
-- numpy
-- pydantic
-- loguru
-- yaml
-
-### 4.2 前端
-
-- Streamlit
-
-### 4.3 检索与知识库
-
-- Chroma
-- Embedding Model
-- BM25 Retrieval
-- Dense Vector Retrieval
-- BM25 / Dense Hybrid Retrieval
-- Rerank
-- Metadata Filter
-- Evidence Table
-
-### 4.4 大模型与本地推理
-
-- Ollama
-- 本地大模型
-- 本地 Embedding 模型
-- 可扩展到其他 LLM Provider
-
-### 4.5 Agent Workflow
-
-- 查询理解
-- 意图识别
-- 检索工具调用
-- 缺陷诊断工具
-- 参数影响分析工具
-- 方法对比工具
-- 证据整理工具
-- 人工复核工具
-- 知识缺口记录工具
+- **GitHub 普通仓库**：只放代码、配置、文档、少量样例和构建脚本；
+- **本地 full 模式**：使用本地 896 篇论文和本地向量库；
+- **公开 Demo 模式**：固定使用 `public_full_release`；
+- **上传 PDF 功能**：只作为用户增量补充，不作为默认知识库来源。
 
 ---
 
-## 5. 项目目录结构
+## 7. 技术架构
 
-```text
-injection-molding-rag-agent/
-├── app/
-│   ├── streamlit_app.py              # Streamlit 前端入口
-│   ├── pages/                        # 多页面应用
-│   └── components/                   # UI 组件
-│
-├── src/
-│   ├── config/                       # 配置加载
-│   ├── data/                         # 数据结构与数据加载
-│   ├── parsing/                      # PDF 解析与文本清洗
-│   ├── chunking/                     # 文本切分与 chunk 构建
-│   ├── embeddings/                   # embedding 生成
-│   ├── vectorstore/                  # Chroma 向量库封装
-│   ├── retrieval/                    # BM25 / Dense / Hybrid 检索
-│   ├── rerank/                       # rerank 模块
-│   ├── rag/                          # RAG 问答链路
-│   ├── agents/                       # Agent 工作流
-│   ├── tools/                        # Agent 工具
-│   ├── evaluation/                   # 评测脚本与评测集
-│   └── utils/                        # 通用工具函数
-│
-├── configs/
-│   ├── app_config.yaml               # 应用配置
-│   ├── model_config.yaml             # 模型配置
-│   └── retrieval_config.yaml         # 检索配置
-│
-├── docs/
-│   ├── project_design.md             # 项目设计文档
-│   ├── agent_tool_design.md          # Agent 工具设计
-│   ├── multimodal_design.md          # 多模态与多类型数据处理方案
-│   └── evaluation_design.md          # 评测设计
-│
-├── data/
-│   ├── samples/                      # 少量公开样例数据
-│   ├── eval/                         # 人工评测问题
-│   └── README.md                     # 数据说明
-│
-├── scripts/
-│   ├── check_env.py                  # 环境检查脚本
-│   ├── parse_papers.py               # PDF 解析脚本
-│   ├── build_chunks.py               # chunk 构建脚本
-│   ├── build_index.py                # 向量库构建脚本
-│   └── run_eval.py                   # 评测脚本
-│
-├── tests/
-│   ├── test_retrieval.py
-│   ├── test_rag.py
-│   └── test_tools.py
-│
-├── requirements.txt
-├── README.md
-├── LICENSE
-└── .gitignore
+```mermaid
+flowchart TD
+    A[Streamlit UI] --> B[Application Service]
+    B --> C[LangGraph Agent Workflow]
+    C --> D[LangChain Adapter Layer]
+
+    D --> E[Query Understanding]
+    D --> F[Retriever Router]
+    D --> G[Memory Manager]
+    D --> H[LLM Adapter]
+
+    F --> I[BM25 Retriever]
+    F --> J[Dense Vector Retriever]
+    F --> K[Hybrid Retrieval]
+    K --> L[Reranker]
+    L --> M[Evidence Table]
+
+    M --> N[Answer Generator]
+    G --> N
+    H --> N
+
+    N --> O[Risk Guardrails]
+    O --> P[Final Answer with Evidence]
+    O --> Q[Human Review / Knowledge Gap]
+
+    R[PDF Upload] --> S[PDF Parser]
+    S --> T[Chunk Builder]
+    T --> U[Embedding]
+    U --> V[Incremental Vector Store]
+    V --> F
 ```
 
-说明：实际目录可能会随着项目迭代调整，以上结构用于说明当前仓库的主要模块划分。
+### 7.1 分层说明
+
+| 层级 | 作用 |
+|---|---|
+| UI 层 | Streamlit 前端，提供问答、模式切换、证据展示、PDF 上传入口 |
+| Agent 层 | 使用 LangGraph 编排查询理解、检索、工具调用、风险判断、记忆更新 |
+| LangChain Adapter 层 | 统一封装 LLM、Retriever、Prompt、Memory、Output Parser |
+| RAG 层 | 负责 chunk 检索、混合召回、rerank、证据表格整理和答案生成 |
+| Memory 层 | 管理短期对话记忆、上下文窗口和长对话摘要 |
+| Data 层 | 管理 PDF、metadata、chunks、cards、Chroma vector store |
+| Guardrail 层 | 处理证据不足、结论冲突、高风险问题和人工复核 |
 
 ---
 
-## 6. 本地运行步骤
+## 8. 数据流
 
-### 6.1 克隆项目
+### 8.1 离线知识库构建流程
+
+```mermaid
+flowchart LR
+    A[PDF Papers] --> B[PDF Parse]
+    B --> C[Text Cleaning]
+    C --> D[Chunk Building]
+    D --> E[Metadata Enrichment]
+    E --> F[Paper / Defect / Parameter Cards]
+    D --> G[Embedding]
+    G --> H[Chroma Vector Store]
+    D --> I[BM25 Index]
+```
+
+流程说明：
+
+1. 解析 PDF，抽取正文、标题、表格文本、图标题和公式附近文本；
+2. 清洗页眉页脚、参考文献噪声和重复内容；
+3. 按论文结构构建 chunk，而不是简单固定长度切分；
+4. 生成 metadata、paper cards、defect cards、parameter cards；
+5. 生成 embedding，并写入 Chroma vector store；
+6. 同步构建 BM25 索引，用于关键词召回；
+7. 最终形成可用于 RAG / Agent 的本地知识库。
+
+### 8.2 在线问答流程
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant UI as Streamlit
+    participant A as Agent Workflow
+    participant R as Retriever
+    participant M as Memory
+    participant L as LLM
+    participant G as Guardrails
+
+    U->>UI: 输入问题
+    UI->>A: 传入问题、corpus mode、会话状态
+    A->>M: 读取短期记忆与摘要
+    A->>A: 判断意图和风险等级
+    A->>R: 选择检索策略并召回证据
+    R->>A: 返回 chunk、metadata、score
+    A->>L: 基于证据生成回答
+    L->>G: 输出候选答案
+    G->>A: 检查证据不足、冲突、高风险
+    A->>M: 更新记忆与长对话摘要
+    A->>UI: 返回答案、证据、风险提示
+```
+
+---
+
+## 9. Agent Workflow
+
+项目通过 LangGraph 将 Agent 流程显式建模为状态图，便于调试、扩展和面试展示。
+
+```mermaid
+flowchart TD
+    START([User Query]) --> Q[Query Understanding]
+    Q --> C[Load Conversation Context]
+    C --> I[Intent Classification]
+    I --> R{Risk / Intent Router}
+
+    R -->|General RAG| S[search_papers_tool]
+    R -->|Defect| D[defect_diagnosis_tool]
+    R -->|Parameter| P[parameter_effect_tool]
+    R -->|Method Compare| M[method_compare_tool]
+    R -->|No Evidence / High Risk| H[human_review_tool]
+
+    S --> E[evidence_extract_tool]
+    D --> E
+    P --> E
+    M --> E
+
+    E --> V[Evidence Validation]
+    V -->|Enough Evidence| A[Answer Generation]
+    V -->|Weak / Conflict| H
+
+    A --> G[Guardrail Check]
+    G -->|Safe| U[Update Memory]
+    G -->|High Risk| H
+
+    H --> K[knowledge_gap_tool]
+    U --> END([Final Answer])
+    K --> END
+```
+
+### 9.1 工具列表
+
+| 工具 | 作用 |
+|---|---|
+| `search_papers_tool` | 按关键词、语义和 metadata 检索论文证据 |
+| `defect_diagnosis_tool` | 根据缺陷现象检索可能原因、相关参数和排查方向 |
+| `parameter_effect_tool` | 分析某个工艺参数对质量指标或缺陷的影响 |
+| `method_compare_tool` | 对比论文中的算法、优化方法或知识组织方法 |
+| `evidence_extract_tool` | 将检索结果整理为结构化 evidence table |
+| `human_review_tool` | 证据不足、结论冲突、高风险问题时进入人工复核 |
+| `knowledge_gap_tool` | 记录论文库没有覆盖的问题，形成后续补库任务 |
+
+---
+
+## 10. Memory 和 Long Context 设计
+
+项目计划引入短期对话记忆、上下文管理和长对话摘要，使系统支持更自然的多轮问答。
+
+### 10.1 短期对话记忆
+
+保存最近若干轮用户问题、系统回答、检索证据和关键实体，例如：
+
+```text
+用户：注塑件缩水一般和哪些参数有关？
+系统：保压压力、保压时间、熔体温度、冷却时间等……
+用户：那它对重量有什么影响？
+```
+
+第二轮中的“它”需要从上下文中解析为“保压压力 / 保压阶段相关参数”。
+
+### 10.2 上下文管理
+
+系统不会把所有历史对话无脑塞进 prompt，而是按优先级选择上下文：
+
+1. 当前问题；
+2. 最近若干轮对话；
+3. 当前问题相关的历史摘要；
+4. 当前 corpus mode；
+5. 本轮检索到的 evidence；
+6. 用户上传文献产生的增量证据；
+7. 风险提示和人工复核规则。
+
+### 10.3 长对话摘要
+
+当对话变长时，系统将历史内容压缩为结构化摘要：
+
+```yaml
+conversation_summary:
+  user_goal: "分析注塑件缩水和工艺参数的关系"
+  key_entities:
+    defects: ["缩水"]
+    parameters: ["保压压力", "保压时间", "熔体温度"]
+    materials: ["未指定"]
+  confirmed_findings:
+    - "保压压力通常与缩水和重量变化有关，但需要结合材料和模具结构判断。"
+  unresolved_questions:
+    - "用户尚未提供具体材料、制件结构和工艺窗口。"
+  risk_level: "medium"
+```
+
+### 10.4 Memory 边界
+
+Memory 只用于提升多轮对话体验，不替代论文证据：
+
+- 结论必须优先来自当前检索证据；
+- 记忆中的旧结论不能直接当作新问题证据；
+- 上传文献默认作为增量补充，不覆盖 `public_full_release` 主知识库；
+- 高风险问题始终需要人工复核。
+
+---
+
+## 11. 文献上传与增量索引
+
+项目计划支持用户在界面上传新的注塑论文 PDF，并实时增量更新知识库。
+
+### 11.1 上传流程
+
+```mermaid
+flowchart LR
+    A[Upload PDF] --> B[Validate File]
+    B --> C[Parse PDF]
+    C --> D[Clean Text]
+    D --> E[Build Chunks]
+    E --> F[Generate Metadata]
+    F --> G[Embedding]
+    G --> H[Incremental Chroma Update]
+    H --> I[Refresh Retriever]
+    I --> J[Available in Current Session]
+```
+
+### 11.2 增量索引设计
+
+上传文献不会直接混入默认主知识库，而是写入独立 namespace 或 collection，例如：
+
+```text
+vector_store/
+├── public_full_release/     # 公开 Demo 默认知识库
+├── full/                    # 本地 full 知识库
+└── user_uploads/            # 用户上传增量文献
+```
+
+检索时可配置：
+
+| 检索范围 | 说明 |
+|---|---|
+| `base_only` | 只检索当前 corpus mode 对应的基础知识库 |
+| `uploads_only` | 只检索用户上传文献 |
+| `base_plus_uploads` | 同时检索基础知识库和上传文献 |
+| `selected_uploads` | 只检索用户指定的上传文献 |
+
+### 11.3 上传文献的工程约束
+
+- 校验文件类型、大小和页数；
+- 使用文件 hash 做去重；
+- 解析失败时返回错误原因；
+- embedding 失败时不污染主向量库；
+- 上传文献只在用户明确选择时参与检索；
+- 公开 Demo 中上传功能只作为增量补充，不作为默认知识库来源。
+
+---
+
+## 12. 本地 full 模式运行步骤
+
+本地 full 模式用于运行最完整效果，适合作者本机或企业内部环境。
+
+### 12.1 克隆项目
 
 ```bash
-git clone https://github.com/your-username/injection-molding-rag-agent.git
+git clone https://github.com/<owner>/<repo>.git
 cd injection-molding-rag-agent
 ```
 
----
+### 12.2 创建环境
 
-### 6.2 创建 Python 环境
-
-推荐使用 Python 3.10 或 Python 3.11。
-
-使用 conda：
+推荐 Python 3.10 或 3.11。
 
 ```bash
-conda create -n molding-rag python=3.10
+conda create -n molding-rag python=3.10 -y
 conda activate molding-rag
-```
-
-或者使用 venv：
-
-```bash
-python -m venv .venv
-```
-
-Windows PowerShell：
-
-```bash
-.venv\Scripts\activate
-```
-
-macOS / Linux：
-
-```bash
-source .venv/bin/activate
-```
-
----
-
-### 6.3 安装依赖
-
-```bash
 pip install -r requirements.txt
 ```
 
----
+也可以使用 venv：
 
-### 6.4 检查环境
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 12.3 检查环境
 
 ```bash
 python scripts/check_env.py
 ```
 
-如果环境正常，脚本会检查 Python 版本、关键依赖和项目路径。
+### 12.4 准备本地模型
 
----
-
-### 6.5 准备本地模型
-
-本项目默认支持 Ollama 本地模型。
-
-安装 Ollama 后，可以拉取本地模型，例如：
+默认可使用 Ollama 本地大模型：
 
 ```bash
 ollama pull qwen2.5
 ```
 
-也可以根据机器性能更换为其他本地模型。
+Embedding 模型可根据配置选择 BGE / sentence-transformers 系列模型。
 
-Embedding 模型可以根据配置选择本地 sentence-transformers / BGE 系列模型。
+### 12.5 准备 full 语料
 
----
-
-### 6.6 准备数据
-
-普通 GitHub 仓库不直接包含完整的 819 篇论文和完整向量库。
-
-你可以使用以下几种方式运行：
-
-1. 使用仓库中的少量示例文档；
-2. 自行准备注塑成型相关 PDF；
-3. 使用作者单独提供的 full artifact；
-4. 重新构建本地知识库。
-
-推荐数据路径：
+将本地 896 篇论文放入本地数据目录，例如：
 
 ```text
 data/
-├── papers/          # 本地论文 PDF，不上传 GitHub
-├── processed/       # 解析后的中间文件
-├── chunks/          # chunk 文件
-└── vectorstore/     # Chroma 向量库，不上传 GitHub
+├── papers_full/             # 本地 896 篇 PDF，不提交 GitHub
+├── processed_full/
+├── chunks_full/
+└── vector_store_full/
 ```
 
----
+### 12.6 设置 corpus mode
 
-### 6.7 构建知识库
+在配置文件中设置：
 
-解析论文：
+```yaml
+corpus:
+  mode: full
+  paths:
+    full:
+      papers_dir: data/papers_full
+      chunks_dir: data/chunks_full
+      metadata_dir: data/metadata_full
+      vector_store_dir: data/vector_store_full
+```
+
+也可以通过环境变量切换：
 
 ```bash
-python scripts/parse_papers.py
+set CORPUS_MODE=full
 ```
 
-构建 chunk：
+macOS / Linux：
 
 ```bash
-python scripts/build_chunks.py
+export CORPUS_MODE=full
 ```
 
-构建向量库：
+### 12.7 构建 full 知识库
 
 ```bash
-python scripts/build_index.py
+python scripts/parse_papers.py --corpus_mode full
+python scripts/build_chunks.py --corpus_mode full
+python scripts/build_index.py --corpus_mode full
 ```
 
-如果你已经有本地向量库，可以跳过重新构建，直接在配置文件中指定路径。
+如果已经有本地 full 向量库，可以跳过构建步骤，直接配置路径。
 
----
-
-### 6.8 启动 Streamlit
+### 12.8 启动应用
 
 ```bash
 streamlit run app/streamlit_app.py
 ```
 
-启动后，在浏览器中访问：
+访问：
 
 ```text
 http://localhost:8501
@@ -412,324 +563,209 @@ http://localhost:8501
 
 ---
 
-## 7. 数据说明
+## 13. Public Demo 模式运行步骤
 
-本项目当前本地知识库包含注塑成型相关论文 819 篇，用于构建企业级论文知识库。
+公开 Demo 默认使用 `public_full_release`，保证展示效果尽量接近 full 本地库，同时不在普通 Git 仓库中直接包含 PDF 原文和完整大体积向量库。
 
-由于论文 PDF 和完整向量库文件较大，且可能涉及版权和分发限制，普通 GitHub 仓库暂时不直接上传：
+### 13.1 克隆代码仓库
 
-- 819 篇完整论文 PDF；
-- 完整 Chroma 向量库；
-- 大规模 embedding 文件；
-- 完整解析中间产物。
+```bash
+git clone https://github.com/<owner>/<repo>.git
+cd injection-molding-rag-agent
+```
 
-公开仓库主要包含：
+### 13.2 安装依赖
 
-- 核心代码；
+```bash
+conda create -n molding-rag python=3.10 -y
+conda activate molding-rag
+pip install -r requirements.txt
+```
+
+### 13.3 下载 full_release_no_pdf_v1
+
+从 GitHub Release 下载：
+
+```text
+full_release_no_pdf_v1
+```
+
+该数据包不包含 PDF 原文，只包含公开 Demo 所需的解析产物、结构化卡片和向量库。
+
+推荐解压目录：
+
+```text
+data/public_full_release/
+├── full_chunks/
+├── metadata/
+├── paper_cards/
+├── defect_cards/
+├── parameter_cards/
+├── vector_store/
+├── manifest.json
+└── README_RELEASE.md
+```
+
+如果项目提供下载脚本，可使用：
+
+```bash
+python scripts/download_release_artifact.py \
+  --release_tag full_release_no_pdf_v1 \
+  --output_dir data/public_full_release
+```
+
+### 13.4 设置 public_full_release 模式
+
+```yaml
+corpus:
+  mode: public_full_release
+  paths:
+    public_full_release:
+      chunks_dir: data/public_full_release/full_chunks
+      metadata_dir: data/public_full_release/metadata
+      paper_cards_dir: data/public_full_release/paper_cards
+      defect_cards_dir: data/public_full_release/defect_cards
+      parameter_cards_dir: data/public_full_release/parameter_cards
+      vector_store_dir: data/public_full_release/vector_store
+```
+
+或通过环境变量：
+
+```bash
+set CORPUS_MODE=public_full_release
+```
+
+macOS / Linux：
+
+```bash
+export CORPUS_MODE=public_full_release
+```
+
+### 13.5 启动公开 Demo
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+公开 Demo 中：
+
+- 默认知识库固定为 `public_full_release`；
+- 用户上传 PDF 只作为增量补充；
+- 上传内容不会替代默认知识库；
+- 系统回答仍需要基于检索证据，并保留风险提示。
+
+---
+
+## 14. GitHub Release 数据分发说明
+
+### 14.1 为什么普通 GitHub 仓库只放代码
+
+普通 Git 仓库不适合直接放入大体积 PDF、chunks 和完整 vector store，原因包括：
+
+1. **仓库体积膨胀**：大文件会让 clone、pull、CI 都变慢；
+2. **Git 历史难清理**：一旦大文件进入历史记录，即使删除也会继续占用仓库历史空间；
+3. **协作成本高**：频繁更新向量库会导致大量二进制文件变化；
+4. **版权说明复杂**：论文 PDF 原文公开再分发需要逐篇确认授权；
+5. **工程边界更清晰**：代码版本和数据制品版本应该解耦管理。
+
+因此，GitHub 仓库本体只保留：
+
+- 源代码；
 - 配置文件；
 - 项目文档；
-- 少量示例数据；
-- 评测问题样例；
-- 可复现的构建脚本。
+- 少量公开样例；
+- 评测样例；
+- 构建与下载脚本；
+- `.env.example` 和 `.gitignore`。
 
-完整数据和向量库后续可以作为 `full_artifact` 单独提供，例如：
+### 14.2 为什么使用 GitHub Release 分发 full artifact
+
+GitHub Release 更适合发布与代码版本绑定的大体积制品：
+
+- 可以按 tag 管理数据版本；
+- 不污染 Git commit 历史；
+- 便于用户下载固定版本；
+- 可以提供 manifest、checksum 和 release note；
+- 适合作为公开 Demo 的数据入口。
+
+### 14.3 full_release_no_pdf_v1 包含什么
+
+`full_release_no_pdf_v1` 计划包含：
 
 ```text
-full_artifact/
-├── papers/
-├── processed/
-├── chunks/
-├── vectorstore/
-├── metadata/
-└── eval_results/
+full_release_no_pdf_v1/
+├── full_chunks/             # 由 full 896 篇文献解析得到的 chunk
+├── metadata/                # 论文标题、作者、年份、来源、chunk 映射等元数据
+├── paper_cards/             # 论文级结构化卡片
+├── defect_cards/            # 缺陷相关知识卡片
+├── parameter_cards/         # 工艺参数相关知识卡片
+├── vector_store/            # Chroma vector store
+├── manifest.json            # 文件清单、版本、hash、构建信息
+├── checksums.sha256         # 校验文件
+└── README_RELEASE.md        # 数据包说明
 ```
+
+### 14.4 为什么不放 PDF 原文
+
+本次公开主线不直接发布 PDF 原文，主要原因：
+
+1. **体积大**：896 篇 PDF 会显著增加下载和存储成本；
+2. **clone 慢**：如果放入普通仓库，会严重影响使用体验；
+3. **版权说明复杂**：论文原文是否可再分发需要逐篇确认；
+4. **Demo 不强依赖 PDF 原文**：RAG 问答主要依赖 chunks、metadata 和 vector store；
+5. **公开边界清晰**：先公开无 PDF 的 full artifact，更适合作为求职展示和功能演示。
+
+换句话说，`public_full_release` 的目标不是重新分发论文原文，而是让公开 Demo 尽量接近本地 full 知识库的检索和问答效果。
 
 ---
 
-## 8. 示例问题
+## 15. RAG / Agent 亮点
 
-### 8.1 RAG 问答
+### 15.1 面向论文库，而不是普通 FAQ
 
-```text
-注塑成型中熔体温度对产品质量有什么影响？
-```
+系统处理的是论文 PDF、metadata、chunk、结构化卡片和向量库，而不是手写问答对。因此更强调证据检索、来源追溯和论文方法对比。
 
-```text
-哪些论文研究了注塑产品重量预测？
-```
+### 15.2 支持多 corpus mode
 
-```text
-注塑过程中模具温度升高通常会带来哪些质量变化？
-```
+通过 `dev` / `selected` / `full` / `public_full_release` 切换，兼顾开发速度、本地完整效果和公开 Demo 可用性。
 
----
+### 15.3 Hybrid Retrieval + Rerank
 
-### 8.2 缺陷诊断
+BM25 适合缺陷名、参数名、材料名等精确术语；Dense Retrieval 适合语义相近问题；Rerank 用于提高最终证据排序质量。
 
-```text
-注塑件出现翘曲，可能是什么原因？
-```
+### 15.4 LangChain Adapter
 
-```text
-缩水咋办？
-```
+将 LLM、Retriever、Prompt、Output Parser、Memory 等模块封装为可替换组件，方便后续切换本地模型、云模型或不同向量库。
 
-```text
-透明件发雾可能和哪些工艺参数有关？
-```
+### 15.5 LangGraph Workflow
 
-```text
-产品变形严重，论文中有哪些常见解释？
-```
+使用显式状态图管理 Agent 流程，便于展示每一步如何完成：
 
----
-
-### 8.3 工艺参数影响
-
-```text
-保压压力对缩水和产品重量有什么影响？
-```
-
-```text
-冷却时间会如何影响尺寸精度？
-```
-
-```text
-注射速度过快可能导致哪些缺陷？
-```
-
----
-
-### 8.4 方法对比
-
-```text
-机器学习和深度学习在注塑质量预测中的区别是什么？
-```
-
-```text
-遗传算法和粒子群优化在注塑参数优化中有什么不同？
-```
-
-```text
-知识图谱方法相比传统 RAG 有什么优势和局限？
-```
-
----
-
-### 8.5 无答案与低置信度问题
-
-```text
-某一种特殊进口材料的最佳注塑参数是多少？
-```
-
-```text
-能不能直接给我一组可用于量产的参数？
-```
-
-```text
-这个产品能不能质量放行？
-```
-
-对于这类问题，系统应提示证据不足或建议人工复核，而不是直接给出高风险结论。
-
----
-
-## 9. 项目亮点
-
-### 9.1 面向注塑论文知识库，而不是普通 FAQ
-
-本项目的数据来源主要是注塑成型相关学术论文，不是简单的问答对或企业 FAQ。
-
-因此系统更强调论文证据检索、引用来源、方法对比和知识追溯。
-
----
-
-### 9.2 PDF 解析与结构化处理
-
-系统支持对论文 PDF 进行解析，并对以下内容进行不同程度的结构化处理：
-
-- 正文段落；
-- 标题层级；
-- 表格；
-- 图标题；
-- 图附近段落；
-- 公式附近文本；
-- 论文 metadata。
-
----
-
-### 9.3 面向 RAG 的 chunk 构建
-
-不是简单按固定长度切分文本，而是尽量结合论文结构进行 chunk 设计：
-
-- 保留标题上下文；
-- 合并相关段落；
-- 控制 chunk 长度；
-- 保留论文来源；
-- 保留章节信息；
-- 支持后续引用证据。
-
----
-
-### 9.4 Embedding 与向量库
-
-使用 embedding 模型将论文 chunk 转换为向量，并存入 Chroma 向量库，实现本地语义检索。
-
----
-
-### 9.5 BM25 / Dense Hybrid Retrieval
-
-系统支持关键词检索和向量检索结合：
-
-- BM25 适合精确术语、参数名、缺陷名；
-- Dense Retrieval 适合语义相近问题；
-- Hybrid Retrieval 提高召回稳定性；
-- 对注塑领域专业问题更友好。
-
----
-
-### 9.6 Rerank 提升证据排序
-
-在初步召回后，通过 rerank 对候选 chunk 重新排序，优先选择更相关、更适合回答当前问题的证据。
-
----
-
-### 9.7 幻觉约束
-
-系统回答时强调基于检索证据：
-
-- 没有证据时不强答；
-- 证据不足时明确说明；
-- 多证据冲突时提示不确定性；
-- 高风险问题进入人工复核；
-- 避免直接编造论文结论或生产参数。
-
----
-
-### 9.8 Agent 工具设计
-
-项目不仅是单轮 RAG 问答，还设计了面向业务任务的 Agent 工具，例如：
-
-- `search_papers_tool`：论文证据检索；
-- `defect_diagnosis_tool`：缺陷诊断；
-- `parameter_effect_tool`：工艺参数影响分析；
-- `method_compare_tool`：论文方法对比；
-- `evidence_extract_tool`：证据表格整理；
-- `human_review_tool`：人工复核；
-- `knowledge_gap_tool`：知识缺口记录。
-
----
-
-### 9.9 评测体系
-
-项目准备了人工评测问题，用于评估系统在不同问题类型上的表现：
-
-- 缺陷原因类；
-- 工艺参数影响类；
-- 质量预测类；
-- 方法对比类；
-- 口语化问题；
-- 无答案问题；
-- 高风险问题。
-
-评测重点包括：
-
-- 检索是否命中有效证据；
-- 回答是否忠实于论文；
-- 是否正确拒答无证据问题；
-- 是否能识别高风险问题；
-- 引用证据是否清晰；
-- 工程解释是否合理。
-
----
-
-## 10. 当前进度
-
-- [x] 本地 Streamlit 应用跑通；
-- [x] `localhost:8501` 可以正常问问题；
-- [x] 支持基于本地论文知识库的 RAG 问答；
-- [x] 完成基础 PDF 解析、chunk、embedding 和向量库流程；
-- [x] 完成初步检索与回答链路；
-- [x] 准备首次上传 GitHub；
-- [ ] 完善公开示例数据；
-- [ ] 完善自动化评测脚本；
-- [ ] 完善 Agent workflow；
-- [ ] 增加 LangGraph 工作流；
-- [ ] 发布 full artifact。
-
----
-
-## 11. 后续计划
-
-### 11.1 引入 LangGraph
-
-后续计划使用 LangGraph 重构 Agent Workflow，使系统具备更清晰的状态流转和工具调用逻辑。
-
-计划节点包括：
-
-- 用户问题理解；
+- 问题理解；
 - 意图识别；
 - 检索策略选择；
 - 工具调用；
 - 证据整理；
-- 答案生成；
 - 风险判断；
-- 人工复核；
-- 知识缺口记录。
+- 答案生成；
+- 记忆更新；
+- 人工复核。
+
+### 15.6 Memory 和 Long Context
+
+支持短期对话记忆、上下文压缩和长对话摘要，让系统能处理“上一条提到的参数”“刚才那种缺陷”等多轮追问。
+
+### 15.7 用户上传 PDF 增量索引
+
+用户可以上传新论文，系统实时解析并增量写入向量库，适合企业持续补充内部文献。
+
+### 15.8 工业场景 Guardrails
+
+对于高风险问题，系统不直接给生产结论，而是提示证据不足、结论冲突或建议人工复核。
 
 ---
 
-### 11.2 对话记忆
-
-增加多轮对话记忆，使系统能够理解上下文问题，例如：
-
-```text
-上一条你说保压压力会影响缩水，那它对重量有什么影响？
-```
-
----
-
-### 11.3 长对话摘要
-
-当用户进行长时间咨询时，系统自动总结前文上下文，避免上下文过长导致回答质量下降。
-
----
-
-### 11.4 上传新文献实时更新知识库
-
-后续计划支持用户上传新的论文 PDF，并自动完成：
-
-- PDF 解析；
-- 文本清洗；
-- chunk 构建；
-- embedding 生成；
-- 向量库增量更新；
-- metadata 更新。
-
----
-
-### 11.5 公开 full artifact
-
-后续计划在条件允许时，单独提供完整构建产物：
-
-- 819 篇论文的 metadata；
-- 解析后的文本；
-- chunk 数据；
-- Chroma 向量库；
-- 检索评测结果；
-- 示例问答结果。
-
----
-
-### 11.6 更完善的多模态处理
-
-后续将逐步增强对论文中表格、图标题、图附近段落和公式的处理能力。
-
-对于缺陷图片识别，将作为扩展功能，只提供候选缺陷类型，不直接给出生产结论。
-
----
-
-## 12. 使用边界与免责声明
+## 16. 使用边界与免责声明
 
 本项目用于注塑论文知识检索、研发辅助分析和求职项目展示，不应直接替代企业现场工程师、质量工程师或设备工程师的判断。
 
@@ -743,33 +779,171 @@ full_artifact/
 - 高价值模具或材料试产；
 - 证据不足或论文结论冲突的情况。
 
-系统输出的工艺建议应理解为“基于论文证据的分析方向”，而不是最终生产决策。
+系统输出应理解为“基于论文证据的分析方向”，而不是最终生产决策。
 
 ---
 
-## 13. 适用场景
+## 17. 示例问题
 
-本项目适合用于：
+### 17.1 RAG 问答
 
-- 企业内部论文知识库；
-- 注塑工艺知识管理；
-- 新员工培训；
-- 工艺工程师辅助检索；
-- 质量工程师缺陷分析；
-- 研发人员方法调研；
-- AI Agent / RAG 项目展示；
-- 工业 AI 求职作品集。
+```text
+注塑成型中熔体温度对产品质量有什么影响？
+哪些论文研究了注塑产品重量预测？
+注塑过程中模具温度升高通常会带来哪些质量变化？
+```
+
+### 17.2 缺陷诊断
+
+```text
+注塑件出现翘曲，可能是什么原因？
+缩水咋办？
+透明件发雾可能和哪些工艺参数有关？
+产品变形严重，论文中有哪些常见解释？
+```
+
+### 17.3 工艺参数影响
+
+```text
+保压压力对缩水和产品重量有什么影响？
+冷却时间会如何影响尺寸精度？
+注射速度过快可能导致哪些缺陷？
+```
+
+### 17.4 方法对比
+
+```text
+机器学习和深度学习在注塑质量预测中的区别是什么？
+遗传算法和粒子群优化在注塑参数优化中有什么不同？
+知识图谱方法相比传统 RAG 有什么优势和局限？
+```
+
+### 17.5 无答案与低置信度问题
+
+```text
+某一种特殊进口材料的最佳注塑参数是多少？
+能不能直接给我一组可用于量产的参数？
+这个产品能不能质量放行？
+```
+
+对于这类问题，系统应提示证据不足或建议人工复核，而不是直接给出高风险结论。
 
 ---
 
-## 14. License
+## 18. 推荐项目目录
 
-本项目代码部分可根据实际情况选择开源协议，例如 MIT License。
-
-论文原文、完整向量库和 full artifact 是否公开，需要根据数据来源、版权和使用许可单独判断。
+```text
+injection-molding-rag-agent/
+├── app/
+│   ├── streamlit_app.py
+│   ├── pages/
+│   └── components/
+│
+├── src/
+│   ├── config/
+│   ├── data/
+│   ├── parsing/
+│   ├── chunking/
+│   ├── embeddings/
+│   ├── vectorstore/
+│   ├── retrieval/
+│   ├── rerank/
+│   ├── rag/
+│   ├── memory/
+│   ├── langchain_adapter/
+│   ├── langgraph_workflow/
+│   ├── agents/
+│   ├── tools/
+│   ├── evaluation/
+│   └── utils/
+│
+├── configs/
+│   ├── app_config.yaml
+│   ├── model_config.yaml
+│   ├── retrieval_config.yaml
+│   └── corpus_config.yaml
+│
+├── data/
+│   ├── samples/
+│   ├── eval/
+│   └── README.md
+│
+├── docs/
+│   ├── project_design.md
+│   ├── agent_tool_design.md
+│   ├── multimodal_design.md
+│   ├── public_full_release_strategy.md
+│   └── assets/
+│
+├── scripts/
+│   ├── check_env.py
+│   ├── parse_papers.py
+│   ├── build_chunks.py
+│   ├── build_index.py
+│   ├── download_release_artifact.py
+│   └── run_eval.py
+│
+├── tests/
+│   ├── test_retrieval.py
+│   ├── test_rag.py
+│   ├── test_memory.py
+│   └── test_tools.py
+│
+├── requirements.txt
+├── README.md
+├── LICENSE
+├── .env.example
+└── .gitignore
+```
 
 ---
 
-## 15. 致谢
+## 19. 后续计划
 
-本项目围绕注塑成型论文知识库、工业 RAG、Agent Workflow 和本地大模型应用展开，目标是探索大模型技术在制造业知识管理和工程辅助分析中的落地方式。
+### 19.1 工程功能
+
+- [ ] 完成 corpus mode 配置统一；
+- [ ] 完成 `public_full_release` 下载与自动校验脚本；
+- [ ] 完成用户上传 PDF 的增量索引；
+- [ ] 完成多 collection / namespace 检索；
+- [ ] 完成 evidence table 可视化；
+- [ ] 增加检索调试页面。
+
+### 19.2 Agent 能力
+
+- [ ] 接入 LangChain adapter；
+- [ ] 使用 LangGraph 重构 Agent workflow；
+- [ ] 增加短期对话记忆；
+- [ ] 增加长对话摘要；
+- [ ] 增加风险判断节点；
+- [ ] 增加知识缺口记录。
+
+### 19.3 数据与评测
+
+- [ ] 从 dev 30 篇切换到 full 896 篇本地文献库；
+- [ ] 发布 `full_release_no_pdf_v1`；
+- [ ] 完善评测问题集；
+- [ ] 评估检索命中率、回答忠实度、拒答能力和高风险识别能力；
+- [ ] 补充更多公开样例问题和 Demo 截图。
+
+### 19.4 多模态扩展
+
+- [ ] 增强论文表格解析；
+- [ ] 处理图标题和图附近段落；
+- [ ] 提取公式附近解释文本；
+- [ ] 尝试缺陷图片识别作为候选缺陷提示；
+- [ ] 对低置信度识别结果强制人工确认。
+
+---
+
+## 20. License
+
+代码部分可根据实际情况选择开源协议，例如 MIT License。
+
+论文原文、完整向量库和 full artifact 是否公开，需要根据数据来源、版权和使用许可单独判断。本项目当前公开主线优先发布不含 PDF 原文的 `full_release_no_pdf_v1`。
+
+---
+
+## 21. 致谢
+
+本项目围绕注塑成型论文知识库、工业 RAG、Agent Workflow、本地大模型和制造业知识管理展开，目标是探索大模型技术在真实工业知识场景中的可落地方式。
