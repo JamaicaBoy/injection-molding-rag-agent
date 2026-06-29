@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
 
 import chromadb
-import yaml
 
-from src.index.build_vector_index import DEFAULT_COLLECTION, DEFAULT_PERSIST_DIR, runtime_persist_dir
+from src.config import DEFAULT_CORPUS_CONFIG, load_corpus_config
+from src.index.build_vector_index import runtime_persist_dir
 from src.retrieval.bm25_retriever import BM25Retriever, DEFAULT_CHUNKS
 from src.retrieval.dense_retriever import DenseRetriever
 from src.retrieval.hybrid_retriever import merge_results
@@ -16,7 +17,10 @@ from src.retrieval.reranker import Reranker
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RETRIEVAL_CONFIG = PROJECT_ROOT / "configs" / "retrieval_config.yaml"
+DEFAULT_RETRIEVAL_CONFIG = DEFAULT_CORPUS_CONFIG
+_ACTIVE_CORPUS = load_corpus_config()
+DEFAULT_PERSIST_DIR = _ACTIVE_CORPUS.vector_persist_dir
+DEFAULT_COLLECTION = _ACTIVE_CORPUS.collection_name
 
 
 EXAMPLE_QUESTIONS = [
@@ -28,18 +32,8 @@ EXAMPLE_QUESTIONS = [
 
 
 def load_vector_store_settings(config_path: Path = DEFAULT_RETRIEVAL_CONFIG) -> tuple[Path, str]:
-    persist_dir = DEFAULT_PERSIST_DIR
-    collection_name = DEFAULT_COLLECTION
-    if config_path.exists():
-        with config_path.open("r", encoding="utf-8") as file:
-            config = yaml.safe_load(file) or {}
-        vector_store = config.get("vector_store", {})
-        configured_dir = vector_store.get("persist_dir")
-        if configured_dir:
-            candidate = Path(str(configured_dir))
-            persist_dir = candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
-        collection_name = str(vector_store.get("collection_name") or collection_name)
-    return persist_dir, collection_name
+    corpus = load_corpus_config(config_path=config_path)
+    return corpus.vector_persist_dir, corpus.collection_name
 
 
 def inspect_retrieval_state(
@@ -50,25 +44,45 @@ def inspect_retrieval_state(
     chunks_path = Path(chunks_path)
     persist_dir = Path(persist_dir)
     chunks_count = 0
+    chunk_paper_ids: set[str] = set()
     if chunks_path.exists():
         with chunks_path.open("r", encoding="utf-8") as file:
-            chunks_count = sum(1 for line in file if line.strip())
+            for line in file:
+                if not line.strip():
+                    continue
+                chunks_count += 1
+                record = json.loads(line)
+                if record.get("paper_id"):
+                    chunk_paper_ids.add(str(record["paper_id"]))
 
     state: dict[str, Any] = {
         "chunks_count": chunks_count,
         "chroma_persist_dir": str(persist_dir),
         "collection_name": collection_name,
         "collection_count": 0,
+        "paper_count": len(chunk_paper_ids),
         "collection_id": "",
         "vector_store_ready": False,
     }
     if not persist_dir.exists():
         return state
 
-    client = chromadb.PersistentClient(path=str(runtime_persist_dir(persist_dir)))
-    collection = client.get_collection(collection_name)
+    try:
+        client = chromadb.PersistentClient(path=str(runtime_persist_dir(persist_dir)))
+        collection = client.get_collection(collection_name)
+    except Exception:
+        return state
     state["collection_count"] = collection.count()
     state["collection_id"] = str(collection.id)
+    if not chunk_paper_ids:
+        chroma_paper_ids: set[str] = set()
+        page_size = 500
+        for offset in range(0, state["collection_count"], page_size):
+            response = collection.get(limit=page_size, offset=offset, include=["metadatas"])
+            for metadata in response.get("metadatas", []):
+                if metadata and metadata.get("paper_id"):
+                    chroma_paper_ids.add(str(metadata["paper_id"]))
+        state["paper_count"] = len(chroma_paper_ids)
     state["vector_store_ready"] = state["collection_count"] > 0
     return state
 
@@ -111,6 +125,7 @@ def retrieve_debug_results(
             "chroma_persist_dir": state["chroma_persist_dir"],
             "collection_name": state["collection_name"],
             "collection_count": state["collection_count"],
+            "paper_count": state["paper_count"],
             "dense_results_count": len(dense_candidates[:top_k]),
             "bm25_results_count": len(bm25_candidates[:top_k]),
             "hybrid_results_count": len(hybrid_results),
@@ -168,9 +183,9 @@ def debug_question(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare BM25, dense, and hybrid retrieval results.")
     parser.add_argument("question", nargs="?", help="Question to retrieve. Runs built-in examples when omitted.")
-    parser.add_argument("--chunks", type=Path, default=DEFAULT_CHUNKS)
-    parser.add_argument("--persist_dir", type=Path, default=DEFAULT_PERSIST_DIR)
-    parser.add_argument("--collection", default=DEFAULT_COLLECTION)
+    parser.add_argument("--chunks", type=Path, default=None)
+    parser.add_argument("--persist_dir", type=Path, default=None)
+    parser.add_argument("--collection", default=None)
     parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--dense_weight", type=float, default=0.6)
     parser.add_argument("--bm25_weight", type=float, default=0.4)
@@ -184,8 +199,12 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
     args = parse_args()
-    bm25 = BM25Retriever(chunks_path=args.chunks)
-    dense = DenseRetriever(persist_dir=args.persist_dir, collection_name=args.collection)
+    corpus = load_corpus_config()
+    chunks_path = args.chunks or corpus.chunks_path
+    persist_dir = args.persist_dir or corpus.vector_persist_dir
+    collection_name = args.collection or corpus.collection_name
+    bm25 = BM25Retriever(chunks_path=chunks_path)
+    dense = DenseRetriever(persist_dir=persist_dir, collection_name=collection_name)
     reranker = None
     if args.use_rerank:
         reranker = Reranker(mode=args.rerank_mode, model_name=args.reranker_model)

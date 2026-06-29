@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Protocol
 
 import chromadb
 
-from src.index.build_vector_index import DEFAULT_COLLECTION, DEFAULT_PERSIST_DIR, runtime_persist_dir
+from src.config import load_corpus_config
+from src.index.build_vector_index import runtime_persist_dir
 from src.retrieval.bm25_retriever import text_preview
+
+
+_ACTIVE_CORPUS = load_corpus_config()
+DEFAULT_PERSIST_DIR = _ACTIVE_CORPUS.vector_persist_dir
+DEFAULT_COLLECTION = _ACTIVE_CORPUS.collection_name
 
 
 class QueryEncoder(Protocol):
@@ -35,23 +45,64 @@ class SentenceTransformerQueryEncoder:
         return embedding.tolist()
 
 
+class SubprocessSentenceTransformerQueryEncoder:
+    """Encode one query in a short-lived process so model RAM is released afterward."""
+
+    def __init__(self, model_name: str, timeout: float = 240.0) -> None:
+        self.model_name = model_name
+        self.timeout = timeout
+
+    def encode_query(self, query: str) -> list[float]:
+        code = """
+import json
+import sys
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer(sys.argv[1])
+embedding = model.encode([sys.argv[2]], normalize_embeddings=True, show_progress_bar=False)[0]
+print(json.dumps(embedding.tolist()))
+"""
+        environment = dict(os.environ)
+        environment["TOKENIZERS_PARALLELISM"] = "false"
+        result = subprocess.run(
+            [sys.executable, "-c", code, self.model_name, query],
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            env=environment,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown error"
+            raise RuntimeError(f"Dense query encoder subprocess failed: {detail}")
+        try:
+            embedding = json.loads(result.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError) as exc:
+            raise RuntimeError("Dense query encoder returned invalid output.") from exc
+        if not isinstance(embedding, list) or not embedding:
+            raise RuntimeError("Dense query encoder returned an empty embedding.")
+        return [float(value) for value in embedding]
+
+
 class DenseRetriever:
     def __init__(
         self,
-        persist_dir: Path = DEFAULT_PERSIST_DIR,
-        collection_name: str = DEFAULT_COLLECTION,
+        persist_dir: Path | None = None,
+        collection_name: str | None = None,
         model_name: str | None = None,
         encoder: QueryEncoder | None = None,
         collection: Any | None = None,
+        subprocess_encoder: bool = False,
     ) -> None:
-        self.persist_dir = Path(persist_dir)
-        self.collection_name = collection_name
+        corpus = load_corpus_config()
+        self.persist_dir = Path(persist_dir or corpus.vector_persist_dir)
+        self.collection_name = collection_name or corpus.collection_name
         if collection is None:
             if not self.persist_dir.exists():
                 raise FileNotFoundError(f"Chroma persist_dir does not exist: {self.persist_dir}")
             runtime_dir = runtime_persist_dir(self.persist_dir)
             client = chromadb.PersistentClient(path=str(runtime_dir))
-            collection = client.get_collection(collection_name)
+            collection = client.get_collection(self.collection_name)
         self.collection = collection
 
         collection_metadata = self.collection.metadata or {}
@@ -63,7 +114,12 @@ class DenseRetriever:
         )
         if not self.model_name and encoder is None:
             raise ValueError("The Chroma collection does not record an embedding model.")
-        self.encoder = encoder or SentenceTransformerQueryEncoder(self.model_name)
+        if encoder is not None:
+            self.encoder = encoder
+        elif subprocess_encoder:
+            self.encoder = SubprocessSentenceTransformerQueryEncoder(self.model_name)
+        else:
+            self.encoder = SentenceTransformerQueryEncoder(self.model_name)
 
     def search(
         self,
@@ -107,4 +163,3 @@ class DenseRetriever:
                 }
             )
         return results
-

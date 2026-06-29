@@ -9,9 +9,11 @@ from typing import Any
 import numpy as np
 from rank_bm25 import BM25Okapi
 
+from src.config import load_corpus_config
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CHUNKS = PROJECT_ROOT / "data" / "chunks" / "chunks.jsonl"
+DEFAULT_CHUNKS = load_corpus_config().chunks_path
 PREVIEW_LENGTH = 200
 
 QUERY_EXPANSIONS = {
@@ -60,8 +62,8 @@ def result_metadata(chunk: dict[str, Any]) -> dict[str, Any]:
 
 
 class BM25Retriever:
-    def __init__(self, chunks_path: Path = DEFAULT_CHUNKS) -> None:
-        self.chunks_path = Path(chunks_path)
+    def __init__(self, chunks_path: Path | None = None) -> None:
+        self.chunks_path = Path(chunks_path or load_corpus_config().chunks_path)
         self.chunks = load_chunks(self.chunks_path)
         if not self.chunks:
             raise ValueError(f"No chunks found in {self.chunks_path}")
