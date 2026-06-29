@@ -1,9 +1,34 @@
 artifact_name: full_release_no_pdf_v1
 artifact_source: github_release
+
 github_owner: JamaicaBoy
 github_repo: injection-molding-rag-agent
 release_tag: full-release-v1
+
 artifact_dir: artifacts/full_release_no_pdf_v1
 chunks_path: artifacts/full_release_no_pdf_v1/data/chunks/full_chunks.jsonl
 vector_persist_dir: artifacts/full_release_no_pdf_v1/vector_store/chroma_full
 collection_name: injection_papers_full
+
+archive_split: true
+archive_name: full_release_no_pdf_v1.zip
+
+assets:
+  - full_release_no_pdf_v1_part001.zip
+  - full_release_no_pdf_v1_part002.zip
+  - full_release_no_pdf_v1_part003.zip
+  - full_release_no_pdf_v1_part004.zip
+  - full_release_no_pdf_v1_part005.zip
+  - full_release_no_pdf_v1_part006.zip
+  - full_release_no_pdf_v1_part007.zip
+  - full_release_no_pdf_v1_part008.zip
+  - full_release_no_pdf_v1_part009.zip
+  - full_release_no_pdf_v1_part010.zip
+  - full_release_no_pdf_v1_part011.zip
+  - full_release_no_pdf_v1_part012.zip
+  - full_release_no_pdf_v1_part013.zip
+  - full_release_no_pdf_v1_part014.zip
+  - full_release_no_pdf_v1_part015.zip
+  - full_release_no_pdf_v1_part016.zip
+  - full_release_no_pdf_v1_part017.zip
+  - full_release_no_pdf_v1_part018.zip
