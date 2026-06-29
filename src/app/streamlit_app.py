@@ -4,6 +4,8 @@ import re
 import sys
 import urllib.error
 import urllib.request
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,14 +18,41 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.agent.tools import defect_diagnosis_tool, method_compare_tool, search_papers_tool
+from src.agent.conversation_state import (
+    ConversationState,
+    resolve_followup_query,
+)
+from src.app.chat_ui import (
+    ensure_active_chat,
+    process_chat_turn,
+    render_chat_messages,
+    render_sidebar_history,
+    save_chat_settings,
+    select_chat,
+    start_new_chat,
+)
+from src.agent.langgraph_workflow import LangGraphWorkflow
 from src.agent.workflow import AgentWorkflow
-from src.rag.answer_generator import AnswerGenerator
-from src.retrieval.bm25_retriever import BM25Retriever, DEFAULT_CHUNKS
+from src.config import SUPPORTED_CORPUS_MODES, load_corpus_config
+from src.index.incremental_index import (
+    add_uploaded_chunks,
+    clear_upload_collection,
+    upload_collection_name,
+    upload_collection_stats,
+)
+from src.index.index_lock import IndexLockError
+from src.index.index_registry import get_index_record
+from src.ingest.ingest_uploaded_paper import (
+    ingest_uploaded_papers,
+    save_uploaded_pdf,
+)
+from src.rag.answer_generator import AnswerGenerator, load_llm_config, unload_ollama_model
+from src.retrieval.bm25_retriever import BM25Retriever
 from src.retrieval.dense_retriever import DenseRetriever
 from src.retrieval.query_rewrite import rewrite_query
+from src.retrieval.multi_collection_retriever import MultiCollectionRetriever
 from src.retrieval.retrieval_debug import (
     inspect_retrieval_state,
-    load_vector_store_settings,
     retrieve_debug_results,
 )
 from src.retrieval.reranker import Reranker
@@ -79,6 +108,8 @@ def evidence_rows(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def friendly_error(exc: Exception) -> str:
     message = str(exc).lower()
+    if isinstance(exc, IndexLockError) or "索引正在更新" in str(exc):
+        return "索引正在更新，请稍后"
     if "chroma" in message or "collection" in message or "persist" in message:
         return "向量索引尚未准备好，请先构建并检查 Chroma collection。"
     if "sentence-transformers" in message or "embedding" in message or "model" in message:
@@ -91,14 +122,19 @@ def friendly_error(exc: Exception) -> str:
 
 
 @st.cache_resource(show_spinner=False)
-def get_bm25() -> BM25Retriever:
-    return BM25Retriever()
+def get_bm25(chunks_path: str, modified_ns: int) -> BM25Retriever:
+    del modified_ns
+    return BM25Retriever(Path(chunks_path))
 
 
 @st.cache_resource(show_spinner=False)
 def get_dense(persist_dir: str, collection_name: str, collection_id: str) -> DenseRetriever:
     del collection_id
-    return DenseRetriever(persist_dir=Path(persist_dir), collection_name=collection_name)
+    return DenseRetriever(
+        persist_dir=Path(persist_dir),
+        collection_name=collection_name,
+        subprocess_encoder=True,
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -106,7 +142,25 @@ def get_reranker() -> Reranker:
     return Reranker(mode="rule")
 
 
-def readiness() -> dict[str, Any]:
+def index_last_build_time(persist_dir: Path, effective_mode: str) -> str:
+    if effective_mode == "full":
+        report_path = PROJECT_ROOT / "data" / "logs" / "full_index_report.md"
+        if report_path.is_file():
+            match = re.search(
+                r"^- completed_at:\s*(.+)$",
+                report_path.read_text(encoding="utf-8"),
+                flags=re.MULTILINE,
+            )
+            if match:
+                return match.group(1).strip()
+    database = persist_dir / "chroma.sqlite3"
+    if not database.is_file():
+        return "未构建"
+    return datetime.fromtimestamp(database.stat().st_mtime).astimezone().isoformat(timespec="seconds")
+
+
+def readiness(corpus_mode: str | None = None) -> dict[str, Any]:
+    corpus = load_corpus_config(mode=corpus_mode)
     model_ready = False
     try:
         with APP_CONFIG.open("r", encoding="utf-8") as file:
@@ -122,40 +176,80 @@ def readiness() -> dict[str, Any]:
             ollama_ready = response.status == 200
     except (OSError, urllib.error.URLError):
         ollama_ready = False
-    persist_dir, collection_name = load_vector_store_settings()
     try:
-        vector_state = inspect_retrieval_state(DEFAULT_CHUNKS, persist_dir, collection_name)
+        vector_state = inspect_retrieval_state(
+            corpus.chunks_path,
+            corpus.vector_persist_dir,
+            corpus.collection_name,
+        )
     except Exception:
         vector_state = {
             "chunks_count": 0,
-            "chroma_persist_dir": str(persist_dir),
-            "collection_name": collection_name,
+            "chroma_persist_dir": str(corpus.vector_persist_dir),
+            "collection_name": corpus.collection_name,
             "collection_count": 0,
+            "paper_count": 0,
             "collection_id": "",
             "vector_store_ready": False,
         }
+    registry_record = get_index_record(
+        corpus_mode=corpus.effective_mode,
+        collection_name=corpus.collection_name,
+    )
+    if registry_record:
+        vector_state["registry_index_version"] = str(registry_record.get("version") or "")
+        vector_state["registry_built_at"] = str(registry_record.get("built_at") or "")
     return {
+        "corpus_mode": corpus.corpus_mode,
+        "effective_mode": corpus.effective_mode,
+        "fallback_mode": corpus.fallback_mode,
+        "fallback_reason": corpus.fallback_reason,
+        "chunks_path": corpus.chunks_path_label,
+        "vector_persist_dir": corpus.vector_persist_dir_label,
+        "legacy_fallback_used": corpus.legacy_fallback_used,
         "chunks": vector_state["chunks_count"] > 0,
         "vector_store": vector_state["vector_store_ready"],
         "embedding_model": model_ready,
         "ollama": ollama_ready,
+        "index_version": str(vector_state.get("collection_id") or "未构建")[:12],
+        "last_build_time": index_last_build_time(corpus.vector_persist_dir, corpus.effective_mode),
         **vector_state,
     }
 
 
-def shared_search(**kwargs: Any) -> dict[str, Any]:
+def shared_search(
+    *,
+    corpus_mode: str | None = None,
+    upload_session_id: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    corpus = load_corpus_config(mode=corpus_mode)
     search_type = kwargs.get("search_type", "hybrid")
     if search_type in {"keyword", "hybrid"}:
-        kwargs["_bm25"] = get_bm25()
+        modified_ns = corpus.chunks_path.stat().st_mtime_ns if corpus.chunks_path.exists() else 0
+        kwargs["_bm25"] = get_bm25(str(corpus.chunks_path), modified_ns)
     if search_type in {"semantic", "hybrid"}:
-        state = readiness()
+        llm_model, llm_base_url = load_llm_config()
+        unload_ollama_model(llm_model, llm_base_url)
+        state = readiness(corpus_mode)
         if not state["vector_store"]:
             raise RuntimeError(f"Chroma collection is not ready: {state['collection_name']}")
-        kwargs["_dense"] = get_dense(
+        base_dense = get_dense(
             state["chroma_persist_dir"],
             state["collection_name"],
             state["collection_id"],
         )
+        if upload_session_id:
+            kwargs["_dense"] = MultiCollectionRetriever.from_chroma(
+                persist_dir=corpus.vector_persist_dir,
+                base_collection_name=corpus.collection_name,
+                upload_collection_name=upload_collection_name(upload_session_id),
+                base_retriever=base_dense,
+                reranker=get_reranker(),
+                rerank_results=False,
+            )
+        else:
+            kwargs["_dense"] = base_dense
     kwargs["_reranker"] = get_reranker()
     return search_papers_tool(**kwargs)
 
@@ -167,28 +261,161 @@ def confidence_value(result: dict[str, Any]) -> str:
     return str(confidence)
 
 
-def run_normal_rag(question: str, top_k: int) -> dict[str, Any]:
-    workflow = AgentWorkflow(
-        retrieval_top_k=max(top_k, 5),
-        search_tool=shared_search,
-        reranker=get_reranker(),
-        answer_generator=AnswerGenerator(mode="ollama"),
+class ConversationAwareAnswerGenerator:
+    """Bind bounded chat context without changing either workflow core."""
+
+    def __init__(
+        self,
+        *,
+        conversation_id: str | None,
+        recent_turns: list[dict[str, Any]] | None,
+        conversation_summary: str | None,
+    ) -> None:
+        self.generator = AnswerGenerator(mode="ollama")
+        self.conversation_id = conversation_id
+        self.recent_turns = list(recent_turns or [])
+        self.conversation_summary = conversation_summary
+        self.context_debug: dict[str, Any] = {}
+        self.active_mode = "ollama"
+        self.fallback_reason: str | None = None
+
+    def generate(
+        self,
+        question: str,
+        query_rewrite: dict[str, Any],
+        evidence_results: list[dict[str, Any]],
+    ) -> Any:
+        result = self.generator.generate(
+            question,
+            query_rewrite,
+            evidence_results,
+            conversation_history=self.recent_turns,
+            conversation_summary=self.conversation_summary,
+            conversation_id=self.conversation_id,
+            recent_turns=self.recent_turns,
+        )
+        self.context_debug = dict(result.context_debug or {})
+        self.active_mode = self.generator.active_mode
+        self.fallback_reason = self.generator.fallback_reason
+        return result
+
+
+def run_normal_rag(
+    question: str,
+    top_k: int,
+    corpus_mode: str,
+    workflow_backend: str = "classic",
+    rewrite: dict[str, Any] | None = None,
+    conversation_id: str | None = None,
+    recent_turns: list[dict[str, Any]] | None = None,
+    conversation_summary: str | None = None,
+    upload_session_id: str | None = None,
+) -> dict[str, Any]:
+    retrieval_top_k = max(top_k, 5)
+    # The workflow re-runs query rewriting internally (it only receives the raw
+    # question string). To let conversation-aware follow-up resolution actually
+    # drive retrieval, inject the already-resolved rewrite (which may have
+    # filled in omitted referents like "那对缩水呢？" from recent turns) instead
+    # of letting the workflow silently recompute a plain, history-blind rewrite.
+    rewriter = (lambda _query: rewrite) if rewrite else None
+    answer_generator = ConversationAwareAnswerGenerator(
+        conversation_id=conversation_id,
+        recent_turns=recent_turns,
+        conversation_summary=conversation_summary,
     )
-    output = workflow.run(question)
+    if workflow_backend == "langgraph":
+        langgraph_kwargs: dict[str, Any] = {
+            "retriever": lambda query, limit: shared_search(
+                corpus_mode=corpus_mode,
+                upload_session_id=upload_session_id,
+                query=query,
+                search_type="hybrid",
+                filters={},
+                top_k=limit,
+                rerank=False,
+                return_chunks=True,
+                language="auto",
+            ),
+            "reranker": get_reranker(),
+            "answer_generator": answer_generator,
+            "retrieval_top_k": retrieval_top_k,
+        }
+        if rewriter is not None:
+            langgraph_kwargs["rewriter"] = rewriter
+        workflow = LangGraphWorkflow(**langgraph_kwargs)
+    else:
+        workflow_kwargs: dict[str, Any] = {
+            "retrieval_top_k": retrieval_top_k,
+            "search_tool": lambda **kwargs: shared_search(
+                corpus_mode=corpus_mode,
+                upload_session_id=upload_session_id,
+                **kwargs,
+            ),
+            "reranker": get_reranker(),
+            "answer_generator": answer_generator,
+        }
+        if rewriter is not None:
+            workflow_kwargs["rewriter"] = rewriter
+        workflow = AgentWorkflow(**workflow_kwargs)
+    output = (
+        workflow.run(question, conversation_id=conversation_id)
+        if workflow_backend == "langgraph"
+        else workflow.run(question)
+    )
+    output["context_debug"] = answer_generator.context_debug
+    output["llm_mode"] = answer_generator.active_mode
+    output["llm_fallback_reason"] = answer_generator.fallback_reason
     trigger = (output.get("review_ticket") or {}).get("audit_log", {}).get("trigger_reason")
-    reasons = [trigger] if trigger else []
+    human_review_reason = output.get("human_review_reason")
+    reasons = [human_review_reason or trigger] if human_review_reason or trigger else []
+    trace = list(output.get("trace", []))
+    trace_summary = {
+        "workflow_backend": workflow_backend,
+        "retrieved_count": int(output.get("retrieved_count", 0)),
+        "reranked_count": int(output.get("reranked_count", 0)),
+        "top_score": round(float(output.get("top_score", 0.0) or 0.0), 6),
+        "confidence": output.get("confidence", "low"),
+        "confidence_reason": output.get("confidence_reason", ""),
+        "llm_mode": answer_generator.active_mode,
+        "llm_fallback_reason": answer_generator.fallback_reason or "",
+        "human_review_reason": human_review_reason or "normal_answer",
+        "executed_nodes": output.get("node_history", []),
+    }
+    debug = {
+        "nodes": output.get("node_history", []),
+        "tools": [item.get("tool") for item in output.get("tool_calls", [])],
+    }
+    if workflow_backend == "langgraph":
+        debug.update({"trace_summary": trace_summary, "trace": trace})
     return {
         **output,
         "review_reasons": reasons,
-        "debug": {
-            "nodes": output.get("node_history", []),
-            "tools": [item.get("tool") for item in output.get("tool_calls", [])],
-        },
+        "debug": debug,
+        "workflow_backend": workflow_backend,
     }
 
 
-def run_defect_diagnosis(question: str, top_k: int, rewrite: dict[str, Any]) -> dict[str, Any]:
-    search = shared_search(query=question, search_type="hybrid", filters={}, top_k=top_k, rerank=True)
+def run_defect_diagnosis(
+    question: str,
+    top_k: int,
+    rewrite: dict[str, Any],
+    corpus_mode: str,
+    upload_session_id: str | None = None,
+) -> dict[str, Any]:
+    # Search with the resolved/rewritten query text (which may have entities
+    # filled in from recent conversation turns) instead of the raw question,
+    # so a follow-up like "那对缩水呢？" actually retrieves on the inherited
+    # parameter rather than just the bare pronoun-laden text.
+    retrieval_query = rewrite.get("normalized_query") or question
+    search = shared_search(
+        corpus_mode=corpus_mode,
+        upload_session_id=upload_session_id,
+        query=retrieval_query,
+        search_type="hybrid",
+        filters={},
+        top_k=top_k,
+        rerank=True,
+    )
     defect_type = (rewrite.get("defect_type") or [None])[0]
     material = (rewrite.get("material") or [None])[0]
     diagnosis = defect_diagnosis_tool(
@@ -221,9 +448,24 @@ def run_defect_diagnosis(question: str, top_k: int, rewrite: dict[str, Any]) -> 
     }
 
 
-def run_method_compare(question: str, top_k: int) -> dict[str, Any]:
+def run_method_compare(
+    question: str,
+    top_k: int,
+    corpus_mode: str,
+    rewrite: dict[str, Any] | None = None,
+    upload_session_id: str | None = None,
+) -> dict[str, Any]:
     methods = extract_method_names(question)
-    search = shared_search(query=question, search_type="hybrid", filters={}, top_k=top_k, rerank=True)
+    retrieval_query = (rewrite or {}).get("normalized_query") or question
+    search = shared_search(
+        corpus_mode=corpus_mode,
+        upload_session_id=upload_session_id,
+        query=retrieval_query,
+        search_type="hybrid",
+        filters={},
+        top_k=top_k,
+        rerank=True,
+    )
     comparison = method_compare_tool(
         methods=[{"method_name": name} for name in methods],
         application_context={"task_type": "parameter_optimization", "available_data": []},
@@ -247,19 +489,39 @@ def run_method_compare(question: str, top_k: int) -> dict[str, Any]:
     }
 
 
-def run_retrieval_debug(question: str, top_k: int) -> dict[str, Any]:
-    persist_dir, collection_name = load_vector_store_settings()
+def run_retrieval_debug(
+    question: str,
+    top_k: int,
+    corpus_mode: str,
+    rewrite: dict[str, Any] | None = None,
+    upload_session_id: str | None = None,
+) -> dict[str, Any]:
+    corpus = load_corpus_config(mode=corpus_mode)
+    retrieval_query = (rewrite or {}).get("normalized_query") or question
     output = retrieve_debug_results(
-        question,
-        chunks_path=DEFAULT_CHUNKS,
-        persist_dir=persist_dir,
-        collection_name=collection_name,
+        retrieval_query,
+        chunks_path=corpus.chunks_path,
+        persist_dir=corpus.vector_persist_dir,
+        collection_name=corpus.collection_name,
         top_k=top_k,
         reranker=get_reranker(),
     )
     keyword_results = output["bm25_results"]
     semantic_results = output["dense_results"]
     hybrid_results = output["reranked_results"] or output["hybrid_results"]
+    if upload_session_id:
+        combined = shared_search(
+            corpus_mode=corpus_mode,
+            upload_session_id=upload_session_id,
+            query=retrieval_query,
+            search_type="hybrid",
+            filters={},
+            top_k=top_k,
+            rerank=True,
+            return_chunks=True,
+            language="auto",
+        )
+        hybrid_results = combined.get("results", hybrid_results)
     return {
         "answer": f"检索完成：BM25 {len(keyword_results)} 条，Dense {len(semantic_results)} 条，Hybrid {len(hybrid_results)} 条。",
         "evidence_list": hybrid_results,
@@ -279,23 +541,104 @@ def run_retrieval_debug(question: str, top_k: int) -> dict[str, Any]:
     }
 
 
-def execute_mode(mode: str, question: str, top_k: int) -> dict[str, Any]:
-    rewritten = rewrite_query(question).to_dict()
-    if mode == MODE_RAG:
-        result = run_normal_rag(question, top_k)
-    elif mode == MODE_DEFECT:
-        result = run_defect_diagnosis(question, top_k, rewritten)
-    elif mode == MODE_METHOD:
-        result = run_method_compare(question, top_k)
+def execute_mode(
+    mode: str,
+    question: str,
+    top_k: int,
+    corpus_mode: str,
+    workflow_backend: str = "classic",
+    conversation: ConversationState | None = None,
+    conversation_id: str | None = None,
+    recent_turns: list[dict[str, Any]] | None = None,
+    conversation_summary: str | None = None,
+    upload_session_id: str | None = None,
+) -> dict[str, Any]:
+    if conversation is not None and conversation.turns:
+        rewritten = resolve_followup_query(question, conversation).to_dict()
     else:
-        result = run_retrieval_debug(question, top_k)
+        rewritten = rewrite_query(question).to_dict()
+    if mode == MODE_RAG:
+        result = run_normal_rag(
+            question,
+            top_k,
+            corpus_mode,
+            workflow_backend,
+            rewritten,
+            conversation_id,
+            recent_turns,
+            conversation_summary,
+            upload_session_id,
+        )
+    elif mode == MODE_DEFECT:
+        result = run_defect_diagnosis(
+            question, top_k, rewritten, corpus_mode, upload_session_id
+        )
+    elif mode == MODE_METHOD:
+        result = run_method_compare(
+            question, top_k, corpus_mode, rewritten, upload_session_id
+        )
+    else:
+        result = run_retrieval_debug(
+            question, top_k, corpus_mode, rewritten, upload_session_id
+        )
     result["query_rewrite"] = rewritten
     result["mode"] = mode
+    result["corpus_mode"] = corpus_mode
+    result["workflow_backend"] = workflow_backend
     return result
 
 
-def render_readiness() -> None:
-    status = readiness()
+def write_startup_report(status: dict[str, Any]) -> Path:
+    report_path = PROJECT_ROOT / "data" / "logs" / "app_startup_report.md"
+    lines = [
+        "# App Startup Report",
+        "",
+        f"- checked_at: {datetime.now().astimezone().isoformat(timespec='seconds')}",
+        f"- requested_corpus_mode: {status['corpus_mode']}",
+        f"- effective_corpus_mode: {status['effective_mode']}",
+        f"- fallback_mode: {status.get('fallback_mode') or 'none'}",
+        f"- chunks_path: {status['chunks_path']}",
+        f"- vector_persist_dir: {status['vector_persist_dir']}",
+        f"- collection_name: {status['collection_name']}",
+        f"- paper_count: {status['paper_count']}",
+        f"- chunk_count: {status['chunks_count']}",
+        f"- vector_count: {status['collection_count']}",
+        f"- index_version: {status['index_version']}",
+        f"- last_build_time: {status['last_build_time']}",
+        f"- vector_store_ready: {str(status['vector_store']).lower()}",
+        "",
+    ]
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+    except OSError:
+        pass
+    return report_path
+
+
+def render_readiness(corpus_mode: str) -> dict[str, Any]:
+    status = readiness(corpus_mode)
+    if status.get("registry_index_version"):
+        status["index_version"] = status["registry_index_version"]
+    if status.get("registry_built_at"):
+        status["last_build_time"] = status["registry_built_at"]
+    st.sidebar.subheader("文献库")
+    st.sidebar.caption(f"当前模式: `{status['effective_mode']}`")
+    st.sidebar.caption(f"chunks_path: `{status['chunks_path']}`")
+    st.sidebar.caption(f"collection_name: `{status['collection_name']}`")
+    st.sidebar.caption(f"论文数量: `{status['paper_count']}`")
+    st.sidebar.caption(f"chunk 数量: `{status['chunks_count']}`")
+    st.sidebar.caption(f"向量数量: `{status['collection_count']}`")
+    st.sidebar.caption(f"索引版本: `{status['index_version']}`")
+    st.sidebar.caption(f"最后构建时间: `{status['last_build_time']}`")
+    if status["fallback_mode"]:
+        st.sidebar.warning(
+            f"`{status['corpus_mode']}` 不可用，已自动降级到 `{status['fallback_mode']}`。"
+        )
+    if status["legacy_fallback_used"]:
+        st.sidebar.caption("当前 dev 模式使用已验证的 legacy baseline。")
+    if corpus_mode == "full" and not status["vector_store"]:
+        st.sidebar.warning("请先运行 full ingest 和 full index 命令")
     st.sidebar.subheader("本地组件")
     for label, key in (
         ("Chunk 数据", "chunks"),
@@ -309,6 +652,7 @@ def render_readiness() -> None:
             st.sidebar.warning(f"{label}：未就绪")
     if not status["ollama"]:
         st.sidebar.caption("Ollama 不可用时，普通 RAG 会使用 Mock 结果。")
+    return status
 
 
 def render_evidence_table(evidence: list[dict[str, Any]]) -> None:
@@ -346,12 +690,37 @@ def render_debug(debug: dict[str, Any]) -> None:
             "methods": debug.get("methods", []),
         }
         st.json(safe_debug)
+        trace_summary = debug.get("trace_summary") or {}
+        if trace_summary:
+            st.subheader("LangGraph trace summary")
+            st.json(trace_summary)
+        trace = list(debug.get("trace") or [])
+        if trace:
+            rows = [
+                {
+                    "node_name": item.get("node_name", ""),
+                    "retrieved_count": item.get("retrieved_count", 0),
+                    "reranked_count": item.get("reranked_count", 0),
+                    "top_score": item.get("top_score", 0.0),
+                    "confidence_before": item.get("confidence_before", ""),
+                    "confidence_after": item.get("confidence_after", ""),
+                    "confidence_reason": item.get("confidence_reason", ""),
+                    "need_human_review": item.get("need_human_review", False),
+                    "human_review_reason": (item.get("output_summary") or {}).get(
+                        "human_review_reason", ""
+                    ),
+                    "error": item.get("error", ""),
+                }
+                for item in trace
+            ]
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
-def render_retrieval_stats(stats: dict[str, Any]) -> None:
+def render_retrieval_stats(stats: dict[str, Any], corpus_mode: str | None = None) -> None:
+    corpus = load_corpus_config(mode=corpus_mode)
     safe_stats = {
         "chunks_count": int(stats.get("chunks_count", 0)),
-        "chroma_persist_dir": "vector_store/chroma",
+        "chroma_persist_dir": corpus.vector_persist_dir_label,
         "collection_name": str(stats.get("collection_name", "")),
         "collection_count": int(stats.get("collection_count", 0)),
         "dense_results_count": int(stats.get("dense_results_count", 0)),
@@ -362,7 +731,7 @@ def render_retrieval_stats(stats: dict[str, Any]) -> None:
     st.json(safe_stats)
 
 
-def main() -> None:
+def legacy_form_main() -> None:
     st.set_page_config(page_title="注塑论文 RAG Agent", layout="wide")
     st.markdown(
         """
@@ -376,13 +745,59 @@ def main() -> None:
     )
     st.title("注塑论文 RAG Agent")
 
+    if "conversation_id" not in st.session_state:
+        st.session_state["conversation_id"] = new_conversation_id()
+    conversation = ensure_current_conversation_state(
+        st.session_state.get("conversation_state"),
+        conversation_id=st.session_state["conversation_id"],
+    )
+    st.session_state["conversation_state"] = conversation
+
+    default_corpus_mode = load_corpus_config().corpus_mode
     with st.sidebar:
         st.header("运行设置")
+        corpus_mode = st.selectbox(
+            "Corpus mode",
+            options=list(SUPPORTED_CORPUS_MODES),
+            index=list(SUPPORTED_CORPUS_MODES).index(default_corpus_mode),
+        )
+        workflow_backend = st.segmented_control(
+            "Workflow backend",
+            options=["classic", "langgraph"],
+            default="classic",
+            width="stretch",
+        ) or "classic"
         top_k = st.slider("证据数量", min_value=3, max_value=10, value=5, step=1)
         show_rewrite = st.toggle("显示 Query Rewrite", value=False)
         show_debug = st.toggle("显示运行详情", value=False)
+        show_summary = st.toggle("显示对话摘要", value=False)
         st.divider()
-    render_readiness()
+        st.subheader("对话记忆")
+        st.caption(f"当前会话轮数：{len(conversation.turns)} / {conversation.max_turns}")
+        if conversation.summary is not None:
+            st.caption("早期对话已压缩为摘要，近期轮次保留完整内容。")
+        if st.button("清空当前对话记忆", width="stretch"):
+            conversation.clear()
+            st.session_state.pop("last_result", None)
+            st.rerun()
+        if show_summary:
+            with st.expander("对话摘要", expanded=True):
+                summary_dict = conversation.summary_dict()
+                if summary_dict is None:
+                    st.caption("对话轮数或长度尚未达到摘要触发条件。")
+                else:
+                    st.json(summary_dict)
+        st.divider()
+    previous_corpus_mode = st.session_state.get("active_corpus_mode")
+    if previous_corpus_mode != corpus_mode:
+        st.session_state.pop("last_result", None)
+        st.session_state["active_corpus_mode"] = corpus_mode
+    previous_workflow_backend = st.session_state.get("active_workflow_backend")
+    if previous_workflow_backend != workflow_backend:
+        st.session_state.pop("last_result", None)
+        st.session_state["active_workflow_backend"] = workflow_backend
+    startup_status = render_readiness(corpus_mode)
+    write_startup_report(startup_status)
 
     mode = st.segmented_control("模式", MODES, default=MODE_RAG, width="stretch") or MODE_RAG
     with st.form("question_form", border=False):
@@ -396,10 +811,32 @@ def main() -> None:
     if submitted:
         if not question.strip():
             st.warning("请输入问题后再运行。")
+        elif not startup_status["vector_store"]:
+            if corpus_mode == "full":
+                st.warning("请先运行 full ingest 和 full index 命令")
+            else:
+                st.warning("当前 corpus mode 的向量索引尚未准备好。")
         else:
             try:
                 with st.spinner("正在检索论文证据并生成结果..."):
-                    st.session_state["last_result"] = execute_mode(mode, question.strip(), top_k)
+                    result = execute_mode(
+                        mode,
+                        question.strip(),
+                        top_k,
+                        corpus_mode,
+                        workflow_backend,
+                        conversation=conversation,
+                    )
+                    st.session_state["last_result"] = result
+                    review_reasons = result.get("review_reasons") or result.get("limitations") or []
+                    conversation.add_turn(
+                        question.strip(),
+                        result.get("answer") or "",
+                        evidence_list=result.get("evidence_list"),
+                        rewrite=result.get("query_rewrite"),
+                        need_human_review=bool(result.get("need_human_review")),
+                        review_reason="；".join(str(reason) for reason in review_reasons if reason),
+                    )
             except Exception as exc:
                 st.session_state.pop("last_result", None)
                 st.error(friendly_error(exc))
@@ -408,7 +845,9 @@ def main() -> None:
     if not result:
         return
 
-    st.caption(f"当前结果模式：{result.get('mode', '')}")
+    st.caption(
+        f"当前结果模式：{result.get('mode', '')} · workflow_backend={result.get('workflow_backend', 'classic')}"
+    )
     metric_confidence, metric_review, metric_evidence = st.columns(3)
     metric_confidence.metric("Confidence", confidence_value(result))
     metric_review.metric("Human Review", "需要" if result.get("need_human_review") else "不需要")
@@ -421,7 +860,7 @@ def main() -> None:
     st.subheader("最终答案")
     st.markdown(result.get("answer") or "当前论文库证据不足。")
     if result.get("mode") == MODE_DEBUG:
-        render_retrieval_stats(result.get("debug_stats", {}))
+        render_retrieval_stats(result.get("debug_stats", {}), result.get("corpus_mode"))
     render_evidence_table(result.get("evidence_list", []))
 
     if show_rewrite:
@@ -430,6 +869,243 @@ def main() -> None:
     if show_debug:
         with st.expander("运行详情", expanded=True):
             render_debug(result.get("debug", {}))
+
+
+def main() -> None:
+    st.set_page_config(page_title="注塑论文 RAG Agent", layout="wide")
+    st.markdown(
+        """
+        <style>
+        .block-container {max-width: 1180px; padding-top: 1.2rem; padding-bottom: 6rem;}
+        div[data-testid="stMetric"] {border: 1px solid rgba(128,128,128,.28); border-radius: 6px; padding: .55rem .75rem;}
+        .stButton > button {border-radius: 6px;}
+        [data-testid="stChatMessage"] {padding: .75rem 0;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    default_corpus_mode = load_corpus_config().corpus_mode
+    chat = ensure_active_chat(
+        st.session_state,
+        default_mode=MODE_RAG,
+        default_corpus_mode=default_corpus_mode,
+    )
+    upload_session_id = st.session_state.setdefault(
+        "upload_session_id", uuid.uuid4().hex[:16]
+    )
+
+    with st.sidebar:
+        st.header("聊天")
+        if st.button("新建聊天", type="primary", width="stretch"):
+            start_new_chat(
+                st.session_state,
+                mode=MODE_RAG,
+                corpus_mode=default_corpus_mode,
+            )
+            st.rerun()
+        selected_chat_id = render_sidebar_history(str(chat["conversation_id"]))
+        if selected_chat_id and selected_chat_id != chat["conversation_id"]:
+            select_chat(st.session_state, selected_chat_id)
+            st.rerun()
+
+        st.divider()
+        st.header("运行设置")
+        configured_corpus = str(chat.get("corpus_mode") or default_corpus_mode)
+        if configured_corpus not in SUPPORTED_CORPUS_MODES:
+            configured_corpus = default_corpus_mode
+        corpus_mode = st.selectbox(
+            "Corpus mode",
+            options=list(SUPPORTED_CORPUS_MODES),
+            index=list(SUPPORTED_CORPUS_MODES).index(configured_corpus),
+            key=f"corpus_mode_{chat['conversation_id']}",
+        )
+        workflow_backend = st.segmented_control(
+            "Workflow backend",
+            options=["classic", "langgraph"],
+            default="classic",
+            key=f"workflow_backend_{chat['conversation_id']}",
+            width="stretch",
+        ) or "classic"
+        top_k = st.slider(
+            "证据数量",
+            min_value=3,
+            max_value=10,
+            value=5,
+            step=1,
+            key=f"top_k_{chat['conversation_id']}",
+        )
+        show_rewrite = st.toggle(
+            "显示 Query Rewrite",
+            value=False,
+            key=f"show_rewrite_{chat['conversation_id']}",
+        )
+        show_debug = st.toggle(
+            "显示运行详情",
+            value=False,
+            key=f"show_debug_{chat['conversation_id']}",
+        )
+        show_summary = st.toggle(
+            "显示对话摘要",
+            value=False,
+            key=f"show_summary_{chat['conversation_id']}",
+        )
+        if show_summary:
+            if chat.get("summary"):
+                st.json(chat["summary"])
+            else:
+                st.caption("当前聊天尚未达到摘要触发条件。")
+        st.divider()
+
+        st.subheader("上传新论文")
+        st.caption(f"会话上传索引：`{upload_collection_name(upload_session_id)}`")
+        uploaded_files = st.file_uploader(
+            "选择 PDF",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key=f"pdf_upload_{upload_session_id}",
+        )
+        active_corpus = load_corpus_config(mode=corpus_mode)
+        if st.button(
+            "处理并更新知识库",
+            width="stretch",
+            disabled=not uploaded_files,
+            key=f"process_uploads_{upload_session_id}",
+        ):
+            try:
+                with st.status("正在处理上传论文...", expanded=True) as upload_status_ui:
+                    saved_paths = []
+                    for uploaded_file in uploaded_files or []:
+                        saved_paths.append(
+                            save_uploaded_pdf(
+                                uploaded_file.name,
+                                uploaded_file.getvalue(),
+                                session_id=upload_session_id,
+                            )
+                        )
+                    upload_status_ui.write(f"已上传：{len(saved_paths)} 篇")
+                    upload_status_ui.write("解析中：parse → clean → chunk")
+                    ingest_stats = ingest_uploaded_papers(
+                        upload_session_id,
+                        pdf_paths=saved_paths,
+                    )
+                    upload_status_ui.write(
+                        f"已生成 chunk：{ingest_stats.chunk_count} 条"
+                    )
+                    index_stats = add_uploaded_chunks(
+                        chunks_path=Path(ingest_stats.chunks_path),
+                        persist_dir=active_corpus.vector_persist_dir,
+                        session_id=upload_session_id,
+                        base_collection_name=active_corpus.collection_name,
+                        batch_size=4,
+                    )
+                    st.session_state["upload_status"] = {
+                        "state": "索引完成",
+                        "uploaded_count": ingest_stats.uploaded_count,
+                        "parsed_count": ingest_stats.parsed_count,
+                        "failed_count": ingest_stats.failed_count,
+                        "chunk_count": ingest_stats.chunk_count,
+                        "vector_count": index_stats.get("collection_count", 0),
+                        "collection_name": index_stats.get("upload_collection_name", ""),
+                        "failures": ingest_stats.failures,
+                    }
+                    upload_status_ui.update(label="上传知识库索引完成", state="complete")
+            except Exception as exc:
+                st.session_state["upload_status"] = {
+                    "state": "失败",
+                    "failure_reason": friendly_error(exc)
+                    if isinstance(exc, IndexLockError)
+                    else f"{type(exc).__name__}: {str(exc)[:300]}",
+                }
+
+        upload_index_state = upload_collection_stats(
+            persist_dir=active_corpus.vector_persist_dir,
+            session_id=upload_session_id,
+        )
+        current_upload_status = st.session_state.get("upload_status") or {}
+        if current_upload_status.get("state") == "索引完成":
+            st.success(
+                f"索引完成：{current_upload_status.get('chunk_count', 0)} chunks，"
+                f"{upload_index_state['vector_count']} vectors"
+            )
+            if current_upload_status.get("failed_count"):
+                st.warning(
+                    f"失败文件：{current_upload_status['failed_count']} 篇；"
+                    "详情见上传状态文件。"
+                )
+        elif current_upload_status.get("state") == "失败":
+            st.error(f"处理失败：{current_upload_status.get('failure_reason', 'unknown error')}")
+        else:
+            st.caption(f"当前上传向量数：{upload_index_state['vector_count']}")
+
+        if st.button(
+            "清空本次上传文献索引",
+            width="stretch",
+            disabled=not upload_index_state["exists"],
+            key=f"clear_uploads_{upload_session_id}",
+        ):
+            try:
+                clear_upload_collection(
+                    persist_dir=active_corpus.vector_persist_dir,
+                    session_id=upload_session_id,
+                )
+                st.session_state["upload_status"] = {
+                    "state": "已清空",
+                    "chunk_count": 0,
+                    "vector_count": 0,
+                }
+                st.rerun()
+            except IndexLockError:
+                st.warning("索引正在更新，请稍后")
+        st.divider()
+
+    startup_status = render_readiness(corpus_mode)
+    write_startup_report(startup_status)
+
+    st.title("注塑论文 RAG Agent")
+    st.caption(f"{chat.get('title', '新聊天')} · conversation_id={chat['conversation_id'][:12]}")
+    configured_mode = str(chat.get("mode") or MODE_RAG)
+    if configured_mode not in MODES:
+        configured_mode = MODE_RAG
+    mode = st.segmented_control(
+        "模式",
+        MODES,
+        default=configured_mode,
+        key=f"answer_mode_{chat['conversation_id']}",
+        width="stretch",
+    ) or MODE_RAG
+    chat = save_chat_settings(chat, mode=mode, corpus_mode=corpus_mode)
+
+    render_chat_messages(
+        chat,
+        show_rewrite=show_rewrite,
+        show_debug=show_debug,
+    )
+
+    prompt = st.chat_input("继续提问注塑缺陷、工艺参数、材料或论文方法...")
+    if prompt:
+        if not startup_status["vector_store"]:
+            if corpus_mode == "full":
+                st.warning("请先运行 full ingest 和 full index 命令。")
+            else:
+                st.warning("当前 corpus mode 的向量索引尚未准备好。")
+            return
+        try:
+            with st.status("正在检索论文证据并生成回答...", expanded=False):
+                result, chat = process_chat_turn(
+                    execute_mode,
+                    chat=chat,
+                    question=prompt.strip(),
+                    top_k=top_k,
+                    corpus_mode=corpus_mode,
+                    mode=mode,
+                    workflow_backend=workflow_backend,
+                    upload_session_id=upload_session_id,
+                )
+                st.session_state["last_result"] = result
+            st.rerun()
+        except Exception as exc:
+            st.error(friendly_error(exc))
 
 
 if __name__ == "__main__":
