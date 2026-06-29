@@ -6,7 +6,13 @@ from typing import Any
 
 import chromadb
 
-from src.index.build_vector_index import DEFAULT_COLLECTION, DEFAULT_PERSIST_DIR, collection_names, runtime_persist_dir
+from src.config import load_corpus_config
+from src.index.build_vector_index import collection_names, runtime_persist_dir
+
+
+_ACTIVE_CORPUS = load_corpus_config()
+DEFAULT_PERSIST_DIR = _ACTIVE_CORPUS.vector_persist_dir
+DEFAULT_COLLECTION = _ACTIVE_CORPUS.collection_name
 
 
 def inspect_index(

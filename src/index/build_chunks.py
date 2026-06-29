@@ -10,15 +10,18 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
+from src.config import load_corpus_config
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_BUILD_CORPUS = load_corpus_config(prefer_configured=True)
 DEFAULT_SECTIONS = PROJECT_ROOT / "data" / "processed" / "cleaned_sections.jsonl"
 DEFAULT_PAPER_CARDS = PROJECT_ROOT / "data" / "processed" / "paper_cards.jsonl"
 DEFAULT_DEFECT_CARDS = PROJECT_ROOT / "data" / "processed" / "defect_cards.jsonl"
 DEFAULT_METHOD_CARDS = PROJECT_ROOT / "data" / "processed" / "method_cards.jsonl"
 DEFAULT_PARAMETER_CARDS = PROJECT_ROOT / "data" / "processed" / "parameter_cards.jsonl"
-DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "chunks" / "chunks.jsonl"
-DEFAULT_REPORT = PROJECT_ROOT / "data" / "chunks" / "chunk_report.md"
+DEFAULT_OUTPUT = _BUILD_CORPUS.chunks_path
+DEFAULT_REPORT = _BUILD_CORPUS.chunks_path.with_name(f"{_BUILD_CORPUS.chunks_path.stem}_report.md")
 
 TARGET_CHARS = 760
 MIN_CHARS = 280
