@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, is_dataclass
@@ -36,12 +37,14 @@ class OllamaClient:
         base_url: str,
         timeout: float = 120.0,
         num_ctx: int = 2048,
+        num_batch: int = 64,
         keep_alive: int | str = 0,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.num_ctx = num_ctx
+        self.num_batch = num_batch
         self.keep_alive = keep_alive
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
@@ -51,8 +54,13 @@ class OllamaClient:
                 "system": system_prompt,
                 "prompt": user_prompt,
                 "stream": False,
+                "think": False,
                 "keep_alive": self.keep_alive,
-                "options": {"temperature": 0.1, "num_ctx": self.num_ctx},
+                "options": {
+                    "temperature": 0.1,
+                    "num_ctx": self.num_ctx,
+                    "num_batch": self.num_batch,
+                },
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -69,10 +77,60 @@ class OllamaClient:
             raise RuntimeError(f"Ollama request failed: HTTP {exc.code}: {detail}") from exc
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Ollama request failed: {exc}") from exc
-        answer = str(result.get("response", "")).strip()
+        answer = self._final_answer(str(result.get("response", "")))
         if not answer:
             raise RuntimeError("Ollama returned an empty response.")
         return answer
+
+    @staticmethod
+    def _final_answer(response: str) -> str:
+        answer = response.strip()
+        if "</think>" in answer:
+            answer = answer.split("</think>", 1)[1].strip()
+        answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL).strip()
+        return answer
+
+
+class FallbackOllamaClient:
+    """Try configured local Ollama models in order before allowing Mock fallback."""
+
+    def __init__(
+        self,
+        models: list[str],
+        base_url: str,
+        num_ctx: int = 2048,
+        num_batch: int = 64,
+        timeout: float = 240.0,
+    ) -> None:
+        unique_models = list(dict.fromkeys(model for model in models if model))
+        if not unique_models:
+            raise ValueError("At least one Ollama model is required.")
+        self.clients = [
+            OllamaClient(
+                model=model,
+                base_url=base_url,
+                num_ctx=num_ctx,
+                num_batch=num_batch,
+                timeout=timeout,
+            )
+            for model in unique_models
+        ]
+        self.active_model = unique_models[0]
+        self.fallback_reason: str | None = None
+
+    def generate(self, system_prompt: str, user_prompt: str) -> str:
+        errors: list[str] = []
+        self.fallback_reason = None
+        for index, client in enumerate(self.clients):
+            try:
+                answer = client.generate(system_prompt, user_prompt)
+                self.active_model = client.model
+                if index > 0:
+                    self.fallback_reason = "; ".join(errors)
+                return answer
+            except Exception as exc:
+                errors.append(f"{client.model}: {type(exc).__name__}: {exc}")
+        raise RuntimeError("All configured Ollama models failed: " + "; ".join(errors))
 
 
 def unload_ollama_model(
@@ -102,16 +160,35 @@ class GeneratedAnswer:
     limitations: list[str]
     need_human_review: bool
     context_debug: dict[str, Any] | None = None
+    llm_mode: str = "ollama"
+    llm_model: str = ""
+    llm_fallback_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def load_llm_config(config_path: Path = DEFAULT_APP_CONFIG) -> tuple[str, str]:
+def load_llm_settings(
+    config_path: Path = DEFAULT_APP_CONFIG,
+) -> tuple[str, str, list[str], int, int, float]:
     with Path(config_path).open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file) or {}
     llm = config.get("llm", {})
-    return str(llm.get("model", "qwen2.5")), str(llm.get("base_url", "http://localhost:11434"))
+    model = str(llm.get("model", "qwen2.5"))
+    base_url = str(llm.get("base_url", "http://localhost:11434"))
+    configured = llm.get("fallback_models") or []
+    if isinstance(configured, str):
+        configured = [configured]
+    fallback_models = [str(item) for item in configured if str(item).strip()]
+    num_ctx = max(512, int(llm.get("num_ctx", 2048)))
+    num_batch = max(1, int(llm.get("num_batch", 64)))
+    timeout = max(30.0, float(llm.get("timeout_seconds", 240)))
+    return model, base_url, fallback_models, num_ctx, num_batch, timeout
+
+
+def load_llm_config(config_path: Path = DEFAULT_APP_CONFIG) -> tuple[str, str]:
+    model, base_url, _, _, _, _ = load_llm_settings(config_path)
+    return model, base_url
 
 
 def rewrite_to_dict(rewrite: RewrittenQuery | dict[str, Any]) -> dict[str, Any]:
@@ -157,9 +234,29 @@ class AnswerGenerator:
         self.fallback_to_mock = fallback_to_mock
         self.review_queue = Path(review_queue)
         self.fallback_reason: str | None = None
+        self.model_fallback_reason: str | None = None
+        self.active_model = ""
         if mode == "ollama" and llm_client is None:
-            model, base_url = load_llm_config(app_config)
-            llm_client = OllamaClient(model=model, base_url=base_url)
+            (
+                model,
+                base_url,
+                fallback_models,
+                num_ctx,
+                num_batch,
+                timeout,
+            ) = load_llm_settings(app_config)
+            llm_client = FallbackOllamaClient(
+                [model, *fallback_models],
+                base_url,
+                num_ctx=num_ctx,
+                num_batch=num_batch,
+                timeout=timeout,
+            )
+            self.active_model = model
+        elif llm_client is not None:
+            self.active_model = str(
+                getattr(llm_client, "active_model", getattr(llm_client, "model", ""))
+            )
         self.llm_client = llm_client
 
     def generate(
@@ -176,6 +273,7 @@ class AnswerGenerator:
     ) -> GeneratedAnswer:
         self.active_mode = self.requested_mode
         self.fallback_reason = None
+        self.model_fallback_reason = None
         rewrite = rewrite_to_dict(query_rewrite)
         evidence_list = prepare_evidence(evidence_results)
         limitations: list[str] = []
@@ -211,6 +309,16 @@ class AnswerGenerator:
                         raise RuntimeError("Ollama client is not initialized.")
                     prompt = render_prompt(managed_context.llm_context, query_info=rewrite)
                     answer = self.llm_client.generate(managed_context.llm_context["system_instruction"], prompt)
+                    self.active_model = str(
+                        getattr(
+                            self.llm_client,
+                            "active_model",
+                            getattr(self.llm_client, "model", self.active_model),
+                        )
+                    )
+                    self.model_fallback_reason = getattr(
+                        self.llm_client, "fallback_reason", None
+                    )
                 except Exception as exc:
                     if not self.fallback_to_mock:
                         raise
@@ -241,6 +349,9 @@ class AnswerGenerator:
             limitations=limitations,
             need_human_review=need_human_review,
             context_debug=context_debug,
+            llm_mode=self.active_mode,
+            llm_model=self.active_model,
+            llm_fallback_reason=self.fallback_reason or self.model_fallback_reason or "",
         )
 
     @staticmethod
