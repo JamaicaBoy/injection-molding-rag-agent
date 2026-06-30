@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -48,9 +49,15 @@ class SentenceTransformerQueryEncoder:
 class SubprocessSentenceTransformerQueryEncoder:
     """Encode one query in a short-lived process so model RAM is released afterward."""
 
-    def __init__(self, model_name: str, timeout: float = 240.0) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        timeout: float = 240.0,
+        max_attempts: int = 2,
+    ) -> None:
         self.model_name = model_name
         self.timeout = timeout
+        self.max_attempts = max(1, max_attempts)
 
     def encode_query(self, query: str) -> list[float]:
         code = """
@@ -64,17 +71,30 @@ print(json.dumps(embedding.tolist()))
 """
         environment = dict(os.environ)
         environment["TOKENIZERS_PARALLELISM"] = "false"
-        result = subprocess.run(
-            [sys.executable, "-c", code, self.model_name, query],
-            capture_output=True,
-            text=True,
-            timeout=self.timeout,
-            env=environment,
-            check=False,
-        )
-        if result.returncode != 0:
-            detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown error"
-            raise RuntimeError(f"Dense query encoder subprocess failed: {detail}")
+        result = None
+        for attempt in range(1, self.max_attempts + 1):
+            result = subprocess.run(
+                [sys.executable, "-c", code, self.model_name, query],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout,
+                env=environment,
+                check=False,
+            )
+            if result.returncode == 0:
+                break
+            if attempt < self.max_attempts:
+                time.sleep(1.0)
+        if result is None or result.returncode != 0:
+            stderr_lines = result.stderr.strip().splitlines() if result is not None else []
+            detail = " | ".join(stderr_lines[-4:]) or "unknown error"
+            return_code = result.returncode if result is not None else "not_started"
+            raise RuntimeError(
+                f"Dense query encoder subprocess failed after {self.max_attempts} attempts "
+                f"(returncode={return_code}): {detail}"
+            )
         try:
             embedding = json.loads(result.stdout.strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError) as exc:
