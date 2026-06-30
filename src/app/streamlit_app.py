@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.agent.tools import defect_diagnosis_tool, method_compare_tool, search_papers_tool
+from src.agent.tools import search_papers_tool
 from src.agent.conversation_state import (
     ConversationState,
     resolve_followup_query,
@@ -46,7 +46,7 @@ from src.ingest.ingest_uploaded_paper import (
     ingest_uploaded_papers,
     save_uploaded_pdf,
 )
-from src.rag.answer_generator import AnswerGenerator, load_llm_config, unload_ollama_model
+from src.rag.answer_generator import AnswerGenerator, load_llm_settings, unload_ollama_model
 from src.retrieval.bm25_retriever import BM25Retriever
 from src.retrieval.dense_retriever import DenseRetriever
 from src.retrieval.query_rewrite import rewrite_query
@@ -62,29 +62,8 @@ APP_CONFIG = PROJECT_ROOT / "configs" / "app_config.yaml"
 
 MODE_RAG = "普通 RAG"
 MODE_DEFECT = "缺陷诊断"
-MODE_METHOD = "方法对比"
 MODE_DEBUG = "检索调试"
-MODES = [MODE_RAG, MODE_DEFECT, MODE_METHOD, MODE_DEBUG]
-
-KNOWN_METHODS = {
-    "GA": (r"\bga\b", "遗传算法"),
-    "PSO": (r"\bpso\b", "粒子群"),
-    "machine learning": ("机器学习", r"\bmachine learning\b"),
-    "deep learning": ("深度学习", r"\bdeep learning\b"),
-    "random forest": ("随机森林", r"\brandom forest\b"),
-    "neural network": ("神经网络", r"\bneural network\b"),
-    "DOE": (r"\bdoe\b", "试验设计", "实验设计"),
-    "response surface": ("响应面", r"\bresponse surface\b"),
-    "Moldflow": ("moldflow",),
-}
-
-
-def extract_method_names(query: str) -> list[str]:
-    names: list[str] = []
-    for name, patterns in KNOWN_METHODS.items():
-        if any(re.search(pattern, query, flags=re.IGNORECASE) for pattern in patterns):
-            names.append(name)
-    return names or ["machine learning"]
+MODES = [MODE_RAG, MODE_DEFECT, MODE_DEBUG]
 
 
 def evidence_rows(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -229,8 +208,9 @@ def shared_search(
         modified_ns = corpus.chunks_path.stat().st_mtime_ns if corpus.chunks_path.exists() else 0
         kwargs["_bm25"] = get_bm25(str(corpus.chunks_path), modified_ns)
     if search_type in {"semantic", "hybrid"}:
-        llm_model, llm_base_url = load_llm_config()
-        unload_ollama_model(llm_model, llm_base_url)
+        llm_model, llm_base_url, fallback_models, _, _, _ = load_llm_settings()
+        for model in [llm_model, *fallback_models]:
+            unload_ollama_model(model, llm_base_url)
         state = readiness(corpus_mode)
         if not state["vector_store"]:
             raise RuntimeError(f"Chroma collection is not ready: {state['collection_name']}")
@@ -277,6 +257,7 @@ class ConversationAwareAnswerGenerator:
         self.conversation_summary = conversation_summary
         self.context_debug: dict[str, Any] = {}
         self.active_mode = "ollama"
+        self.active_model = ""
         self.fallback_reason: str | None = None
 
     def generate(
@@ -296,7 +277,11 @@ class ConversationAwareAnswerGenerator:
         )
         self.context_debug = dict(result.context_debug or {})
         self.active_mode = self.generator.active_mode
-        self.fallback_reason = self.generator.fallback_reason
+        self.active_model = self.generator.active_model
+        self.fallback_reason = (
+            self.generator.fallback_reason
+            or self.generator.model_fallback_reason
+        )
         return result
 
 
@@ -364,6 +349,7 @@ def run_normal_rag(
     )
     output["context_debug"] = answer_generator.context_debug
     output["llm_mode"] = answer_generator.active_mode
+    output["llm_model"] = answer_generator.active_model
     output["llm_fallback_reason"] = answer_generator.fallback_reason
     trigger = (output.get("review_ticket") or {}).get("audit_log", {}).get("trigger_reason")
     human_review_reason = output.get("human_review_reason")
@@ -377,6 +363,7 @@ def run_normal_rag(
         "confidence": output.get("confidence", "low"),
         "confidence_reason": output.get("confidence_reason", ""),
         "llm_mode": answer_generator.active_mode,
+        "llm_model": answer_generator.active_model,
         "llm_fallback_reason": answer_generator.fallback_reason or "",
         "human_review_reason": human_review_reason or "normal_answer",
         "executed_nodes": output.get("node_history", []),
@@ -400,93 +387,29 @@ def run_defect_diagnosis(
     top_k: int,
     rewrite: dict[str, Any],
     corpus_mode: str,
+    workflow_backend: str = "classic",
+    conversation_id: str | None = None,
+    recent_turns: list[dict[str, Any]] | None = None,
+    conversation_summary: str | None = None,
     upload_session_id: str | None = None,
 ) -> dict[str, Any]:
-    # Search with the resolved/rewritten query text (which may have entities
-    # filled in from recent conversation turns) instead of the raw question,
-    # so a follow-up like "那对缩水呢？" actually retrieves on the inherited
-    # parameter rather than just the bare pronoun-laden text.
-    retrieval_query = rewrite.get("normalized_query") or question
-    search = shared_search(
-        corpus_mode=corpus_mode,
-        upload_session_id=upload_session_id,
-        query=retrieval_query,
-        search_type="hybrid",
-        filters={},
+    result = run_normal_rag(
+        question=question,
         top_k=top_k,
-        rerank=True,
-    )
-    defect_type = (rewrite.get("defect_type") or [None])[0]
-    material = (rewrite.get("material") or [None])[0]
-    diagnosis = defect_diagnosis_tool(
-        defect_description=question,
-        defect_type=defect_type,
-        product_context={"material": material},
-        retrieval_top_k=top_k,
-        risk_level=rewrite.get("risk_level", "medium"),
-        _search_fn=lambda **_: search,
-    )
-    causes = diagnosis.get("possible_causes", [])
-    if causes:
-        answer_lines = ["根据当前论文证据，可优先核查以下候选原因："]
-        for cause in causes[:5]:
-            refs = "".join(f"[{item}]" for item in cause.get("supporting_evidence_ids", []))
-            answer_lines.append(f"- {cause.get('cause_description', '')[:260]} {refs}")
-        answer_lines.append(diagnosis["not_final_decision_notice"])
-        answer = "\n".join(answer_lines)
-    else:
-        answer = "当前论文库证据不足，暂时无法形成可靠的缺陷候选原因。"
-    confidence = max((item.get("confidence_score", 0.0) for item in causes), default=0.0)
-    return {
-        "answer": answer,
-        "evidence_list": search.get("results", []),
-        "confidence": confidence,
-        "need_human_review": diagnosis.get("need_human_review", False),
-        "limitations": ["缺陷诊断仅提供候选排查方向，不构成生产指令。"],
-        "review_reasons": ["证据覆盖不足、现场上下文缺失或问题风险较高。"] if diagnosis.get("need_human_review") else [],
-        "debug": {"diagnosis": diagnosis},
-    }
-
-
-def run_method_compare(
-    question: str,
-    top_k: int,
-    corpus_mode: str,
-    rewrite: dict[str, Any] | None = None,
-    upload_session_id: str | None = None,
-) -> dict[str, Any]:
-    methods = extract_method_names(question)
-    retrieval_query = (rewrite or {}).get("normalized_query") or question
-    search = shared_search(
         corpus_mode=corpus_mode,
+        workflow_backend=workflow_backend,
+        rewrite=rewrite,
+        conversation_id=conversation_id,
+        recent_turns=recent_turns,
+        conversation_summary=conversation_summary,
         upload_session_id=upload_session_id,
-        query=retrieval_query,
-        search_type="hybrid",
-        filters={},
-        top_k=top_k,
-        rerank=True,
     )
-    comparison = method_compare_tool(
-        methods=[{"method_name": name} for name in methods],
-        application_context={"task_type": "parameter_optimization", "available_data": []},
-        retrieval_top_k=top_k,
-        _search_fn=lambda **_: search,
-    )
-    lines = ["当前论文证据支持以下定性对比："]
-    for row in comparison.get("comparison_table", []):
-        refs = "".join(f"[{item}]" for item in row.get("supporting_evidence_ids", []))
-        lines.append(f"- **{row['method_name']}**：{row.get('core_idea', '')[:260]} {refs}")
-    lines.append(comparison["recommendation_for_context"]["not_decision_notice"])
-    confidences = [row.get("confidence_score", 0.0) for row in comparison.get("comparison_table", [])]
-    return {
-        "answer": "\n".join(lines),
-        "evidence_list": search.get("results", []),
-        "confidence": sum(confidences) / len(confidences) if confidences else 0.0,
-        "need_human_review": comparison.get("need_human_review", False),
-        "limitations": comparison.get("evidence_conflicts", []),
-        "review_reasons": ["方法证据不足或真实技术选型需要专家确认。"] if comparison.get("need_human_review") else [],
-        "debug": {"methods": methods, "comparison": comparison},
-    }
+    limitations = list(result.get("limitations") or [])
+    diagnosis_notice = "缺陷诊断仅提供有论文证据支持的候选排查方向，不构成直接生产调参指令。"
+    if diagnosis_notice not in limitations:
+        limitations.append(diagnosis_notice)
+    result["limitations"] = limitations
+    return result
 
 
 def run_retrieval_debug(
@@ -571,16 +494,22 @@ def execute_mode(
         )
     elif mode == MODE_DEFECT:
         result = run_defect_diagnosis(
-            question, top_k, rewritten, corpus_mode, upload_session_id
+            question,
+            top_k,
+            rewritten,
+            corpus_mode,
+            workflow_backend,
+            conversation_id,
+            recent_turns,
+            conversation_summary,
+            upload_session_id,
         )
-    elif mode == MODE_METHOD:
-        result = run_method_compare(
-            question, top_k, corpus_mode, rewritten, upload_session_id
-        )
-    else:
+    elif mode == MODE_DEBUG:
         result = run_retrieval_debug(
             question, top_k, corpus_mode, rewritten, upload_session_id
         )
+    else:
+        raise ValueError(f"Unsupported Streamlit mode: {mode}")
     result["query_rewrite"] = rewritten
     result["mode"] = mode
     result["corpus_mode"] = corpus_mode
@@ -1082,7 +1011,7 @@ def main() -> None:
         show_debug=show_debug,
     )
 
-    prompt = st.chat_input("继续提问注塑缺陷、工艺参数、材料或论文方法...")
+    prompt = st.chat_input("继续提问注塑缺陷、工艺参数、材料或质量预测...")
     if prompt:
         if not startup_status["vector_store"]:
             if corpus_mode == "full":

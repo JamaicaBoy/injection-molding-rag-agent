@@ -80,6 +80,9 @@ def _compact_trace(value: dict[str, Any] | None) -> dict[str, Any]:
         "top_score": round(float(value.get("top_score", 0.0) or 0.0), 6),
         "confidence": value.get("confidence", ""),
         "confidence_reason": str(value.get("confidence_reason", ""))[:500],
+        "llm_mode": str(value.get("llm_mode", "")),
+        "llm_model": str(value.get("llm_model", ""))[:100],
+        "llm_fallback_reason": str(value.get("llm_fallback_reason", ""))[:1000],
         "human_review_reason": str(value.get("human_review_reason", ""))[:200],
         "executed_nodes": [str(item) for item in value.get("executed_nodes", [])[:20]],
     }
