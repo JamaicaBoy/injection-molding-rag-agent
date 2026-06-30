@@ -56,7 +56,7 @@
 | Streamlit 基础 Demo | ✅ 已完成 | 本地 `localhost:8501` 可运行 |
 | 基础 RAG 问答 | ✅ 已完成 | 支持基于本地论文 chunk 的问答 |
 | dev 文献库 | ✅ 已完成 | 约 30 篇论文，用于开发调试 |
-| full 本地文献库 | ✅ 已完成 / 已切换 | 已完成 full ingest、full chunks、full Chroma 索引，并用于本地完整效果 |
+| full 本地文献库 | ✅ 已完成 | 已完成 full ingest、full chunks、full Chroma 索引，并用于本地完整效果 |
 | corpus mode | ✅ 已完成 | 支持 `dev` / `selected` / `full` / `public_full_release` |
 | LangChain adapter | ✅ 已完成 | 将检索、LLM、Prompt、Memory 封装为可替换组件 |
 | LangGraph workflow | ✅ 已完成 | 将 Agent 流程显式建模为状态图 |
