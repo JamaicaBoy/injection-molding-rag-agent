@@ -24,6 +24,9 @@ class AgentState(TypedDict, total=False):
     confidence_reason: str
     need_human_review: bool
     human_review_reason: str
+    llm_mode: str
+    llm_model: str
+    llm_fallback_reason: str
     errors: Annotated[list[str], operator.add]
     step_count: int
 

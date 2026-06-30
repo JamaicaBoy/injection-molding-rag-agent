@@ -290,9 +290,21 @@ def answer_node(state: AgentState, deps: LangGraphDependencies) -> dict[str, Any
                 "draft_answer": answer,
                 "evidence_list": evidence,
                 "limitations": list(output.get("limitations", [])),
+                "llm_mode": str(output.get("llm_mode", "ollama")),
+                "llm_model": str(output.get("llm_model", "")),
+                "llm_fallback_reason": str(output.get("llm_fallback_reason", "")),
                 "messages": [AIMessage(content=answer)] if answer else [],
             }
         )
+        if update["llm_mode"] == "mock":
+            update.update(
+                {
+                    "confidence": "low",
+                    "confidence_reason": "Local LLM generation failed and Mock fallback was used.",
+                    "need_human_review": True,
+                    "human_review_reason": "tool_error",
+                }
+            )
     except Exception as exc:
         assessment = assess_confidence(
             state["query"], state.get("query_info", {}), reranked, tool_error=True
@@ -380,6 +392,7 @@ def risk_check_node(state: AgentState, deps: LangGraphDependencies) -> dict[str,
             state.get("query_info", {}),
             evidence,
             citation_passed=bool(state.get("citation_passed", False)),
+            tool_error=state.get("llm_mode") == "mock",
         )
         update.update(_assessment_update(assessment))
         violations = list(guard.get("violations", []))

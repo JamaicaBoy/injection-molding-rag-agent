@@ -111,6 +111,26 @@ def _matches_filters(result: dict[str, Any], filters: dict[str, Any]) -> bool:
     return True
 
 
+def _content_key(result: dict[str, Any]) -> str:
+    text = str(result.get("text_preview", "")).casefold()
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
+    if normalized:
+        return normalized[:500]
+    return f"chunk:{result.get('chunk_id', '')}"
+
+
+def _deduplicate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = _content_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
 def _matched_keywords(result: dict[str, Any], query_terms: list[str]) -> list[str]:
     text = f"{result.get('title', '')} {result.get('text_preview', '')}".lower().replace("_", " ")
     return [term for term in query_terms if term.lower().replace("_", " ") in text]
@@ -154,6 +174,7 @@ def search_papers_tool(
     rewritten = rewrite_query(query)
     retrieval_query = rewritten.normalized_query
     candidate_k = max(top_k * 5 if filters else top_k * 2, top_k)
+    retrieval_warnings: list[str] = []
 
     if search_type == "keyword":
         bm25 = _bm25 or BM25Retriever()
@@ -164,13 +185,27 @@ def search_papers_tool(
     else:
         bm25 = _bm25 or BM25Retriever()
         dense = _dense or DenseRetriever()
-        candidates = merge_results(
-            bm25.search(retrieval_query, top_k=candidate_k),
-            dense.search(retrieval_query, top_k=candidate_k),
-            top_k=candidate_k,
+        bm25_candidates = bm25.search(retrieval_query, top_k=candidate_k)
+        try:
+            dense_candidates = dense.search(retrieval_query, top_k=candidate_k)
+        except Exception as exc:
+            dense_candidates = []
+            retrieval_warnings.append(
+                f"dense_unavailable_bm25_fallback:{type(exc).__name__}"
+            )
+        candidates = (
+            merge_results(
+                bm25_candidates,
+                dense_candidates,
+                top_k=candidate_k,
+            )
+            if dense_candidates
+            else bm25_candidates[:candidate_k]
         )
 
-    candidates = [candidate for candidate in candidates if _matches_filters(candidate, filters)]
+    candidates = _deduplicate_candidates(
+        [candidate for candidate in candidates if _matches_filters(candidate, filters)]
+    )
     if rerank and candidates:
         reranker = _reranker or Reranker(mode="rule")
         candidates = reranker.rerank(query, candidates, top_n=top_k)
@@ -209,7 +244,7 @@ def search_papers_tool(
     overall_confidence = (
         sum(item["relevance_score"] for item in results[:3]) / min(len(results), 3) if results else 0.0
     )
-    warnings: list[str] = []
+    warnings: list[str] = list(retrieval_warnings)
     if not results:
         warnings.append("no_relevant_evidence")
     elif overall_confidence < 0.65:
