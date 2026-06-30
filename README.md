@@ -74,7 +74,9 @@
 
 ### 4.1 带证据的 RAG 回答、证据表与运行详情
 
-![带证据的 RAG 回答、证据表与运行详情](docs/assets/rag_answer_evidence_debug.png)
+![带证据的 RAG 回答、证据表与运行详情1](docs/assets/rag_answer_evidence_debug(1).png)
+
+![带证据的 RAG 回答、证据表与运行详情2](docs/assets/rag_answer_evidence_debug(2).png)
 
 该截图展示普通 RAG 问答结果、引用证据表、检索详情、Query Rewrite、Agent 运行摘要和上下文调试信息，体现系统不是直接生成答案，而是基于论文 chunk 证据进行回答。
 
@@ -97,8 +99,6 @@
 该截图展示缺陷诊断模式下，系统针对“注塑件出现缩水”问题给出可能原因、相关证据、置信度判断和人工复核状态。
 
 ### 4.5 PDF 上传与增量索引
-
-![PDF 上传入口](docs/assets/upload_pdf_select.png)
 
 ![PDF 上传后的增量索引完成状态](docs/assets/upload_pdf_index_complete.png)
 
