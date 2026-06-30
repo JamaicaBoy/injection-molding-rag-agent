@@ -59,6 +59,19 @@ class FakeBM25:
         return [retrieval_result()]
 
 
+class FailingDense:
+    def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
+        raise RuntimeError("embedding memory pressure")
+
+
+class StaticRetriever:
+    def __init__(self, results: list[dict[str, Any]]) -> None:
+        self.results = results
+
+    def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
+        return self.results[:top_k]
+
+
 def fake_search(**kwargs: Any) -> dict[str, Any]:
     return {
         "query": kwargs["query"],
@@ -84,6 +97,52 @@ def test_search_papers_tool_returns_auditable_schema() -> None:
     assert result["source_location"]["page"] == 3
     assert result["relevance_score"] == 0.85
     assert result["citation"]
+
+
+def test_hybrid_search_falls_back_to_bm25_when_dense_is_unavailable() -> None:
+    output = search_papers_tool(
+        "保压压力对缩水的影响",
+        search_type="hybrid",
+        top_k=1,
+        rerank=False,
+        _bm25=FakeBM25(),
+        _dense=FailingDense(),
+    )
+
+    assert len(output["results"]) == 1
+    assert output["results"][0]["paper_id"] == "paper_1"
+    assert "dense_unavailable_bm25_fallback:RuntimeError" in output["warnings"]
+
+
+def test_search_papers_tool_deduplicates_identical_chunk_text() -> None:
+    repeated = "Ensure sufficient clamping force is applied. Figure 22 Flash at sleeve."
+    bm25 = StaticRetriever(
+        [
+            retrieval_result("chunk_a", "paper_a", repeated, 0.91),
+            retrieval_result(
+                "chunk_unique",
+                "paper_c",
+                "Excess injection pressure can promote flash.",
+                0.72,
+            ),
+        ]
+    )
+    dense = StaticRetriever(
+        [retrieval_result("chunk_b", "paper_b", repeated, 0.88)]
+    )
+
+    output = search_papers_tool(
+        "飞边可能是什么原因",
+        search_type="hybrid",
+        top_k=3,
+        rerank=False,
+        _bm25=bm25,
+        _dense=dense,
+    )
+
+    matched_texts = [item["matched_text"] for item in output["results"]]
+    assert len(output["results"]) == 2
+    assert matched_texts.count(repeated) == 1
 
 
 def test_defect_diagnosis_tool_returns_candidates_not_final_decision() -> None:
@@ -180,4 +239,3 @@ def test_knowledge_gap_tool_records_and_detects_duplicate(tmp_path: Path) -> Non
     assert second["status"] == "duplicate"
     assert second["gap_id"] == first["gap_id"]
     assert len(store.read_text(encoding="utf-8").splitlines()) == 1
-

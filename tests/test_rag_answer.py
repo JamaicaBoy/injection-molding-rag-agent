@@ -2,7 +2,7 @@ import csv
 import json
 from pathlib import Path
 
-from src.rag.answer_generator import AnswerGenerator, OllamaClient
+from src.rag.answer_generator import AnswerGenerator, FallbackOllamaClient, OllamaClient
 from src.rag.citation_guard import check_citations
 from src.rag.prompts import SYSTEM_PROMPT
 from src.retrieval.query_rewrite import rewrite_query
@@ -108,7 +108,36 @@ def test_ollama_client_limits_context_and_unloads_after_generation(monkeypatch) 
 
     assert client.generate("system", "question") == "grounded answer [E1]"
     assert captured["payload"]["keep_alive"] == 0
+    assert captured["payload"]["think"] is False
     assert captured["payload"]["options"]["num_ctx"] == 2048
+    assert captured["payload"]["options"]["num_batch"] == 64
+
+
+def test_ollama_client_strips_qwen_thinking() -> None:
+    response = "<think>internal reasoning</think>\n\n最终答案。[E1]"
+
+    assert OllamaClient._final_answer(response) == "最终答案。[E1]"
+
+
+def test_fallback_ollama_client_tries_models_in_order(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_generate(client, system_prompt, user_prompt):
+        del system_prompt, user_prompt
+        calls.append(client.model)
+        if client.model == "qwen2.5:7b":
+            raise RuntimeError("not enough memory")
+        return "本地备用模型回答。[E1]"
+
+    monkeypatch.setattr(OllamaClient, "generate", fake_generate)
+    client = FallbackOllamaClient(
+        ["qwen2.5:7b", "qwen3:4b"], "http://localhost:11434"
+    )
+
+    assert client.generate("system", "prompt") == "本地备用模型回答。[E1]"
+    assert calls == ["qwen2.5:7b", "qwen3:4b"]
+    assert client.active_model == "qwen3:4b"
+    assert "qwen2.5:7b" in str(client.fallback_reason)
 
 
 def test_ollama_fallback_is_retried_on_next_generation(tmp_path: Path) -> None:

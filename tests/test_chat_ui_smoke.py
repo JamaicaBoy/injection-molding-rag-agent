@@ -4,8 +4,12 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.context_manager import build_llm_context
-from src.app.chat_session_store import create_chat, load_chat
-from src.app.chat_ui import ensure_active_chat, process_chat_turn
+from src.app.chat_session_store import create_chat, list_chats, load_chat
+from src.app.chat_ui import (
+    delete_chat_from_history,
+    ensure_active_chat,
+    process_chat_turn,
+)
 
 
 def fake_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -119,3 +123,35 @@ def test_ensure_active_chat_and_context_debug(tmp_path: Path) -> None:
     assert managed.context_debug["history_source"] == "recent_turns"
     assert managed.context_debug["history_turns_received"] == 1
     assert managed.context_debug["conversation_summary_received"] is True
+
+
+def test_delete_current_chat_selects_next_or_allows_new_chat(tmp_path: Path) -> None:
+    older = create_chat(conversation_id="older", storage_dir=tmp_path)
+    current = create_chat(conversation_id="current", storage_dir=tmp_path)
+    session_state: dict[str, Any] = {
+        "active_chat_id": current["conversation_id"],
+        "last_result": {"answer": "stale"},
+        "pending_delete_chat_id": current["conversation_id"],
+    }
+
+    assert delete_chat_from_history(
+        session_state, current["conversation_id"], storage_dir=tmp_path
+    )
+    assert session_state["active_chat_id"] == older["conversation_id"]
+    assert "last_result" not in session_state
+    assert "pending_delete_chat_id" not in session_state
+    assert [item["conversation_id"] for item in list_chats(storage_dir=tmp_path)] == [
+        older["conversation_id"]
+    ]
+
+    assert delete_chat_from_history(
+        session_state, older["conversation_id"], storage_dir=tmp_path
+    )
+    assert "active_chat_id" not in session_state
+    replacement = ensure_active_chat(
+        session_state,
+        default_mode="普通 RAG",
+        default_corpus_mode="full",
+        storage_dir=tmp_path,
+    )
+    assert session_state["active_chat_id"] == replacement["conversation_id"]

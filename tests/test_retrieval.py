@@ -108,6 +108,26 @@ def test_subprocess_query_encoder_parses_embedding_and_releases_model(monkeypatc
     assert captured["kwargs"]["timeout"] == 240.0
 
 
+def test_subprocess_query_encoder_retries_one_transient_failure(monkeypatch) -> None:
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        del command, kwargs
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="temporary memory pressure")
+        return SimpleNamespace(returncode=0, stdout="[0.4, 0.5]\n", stderr="")
+
+    monkeypatch.setattr("src.retrieval.dense_retriever.subprocess.run", fake_run)
+    monkeypatch.setattr("src.retrieval.dense_retriever.time.sleep", lambda seconds: None)
+
+    encoder = SubprocessSentenceTransformerQueryEncoder("local-bge-m3")
+
+    assert encoder.encode_query("shrinkage") == [0.4, 0.5]
+    assert calls == 2
+
+
 def test_hybrid_merge_deduplicates_by_chunk_id() -> None:
     base = {
         "chunk_id": "shared",

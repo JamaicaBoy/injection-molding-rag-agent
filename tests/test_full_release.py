@@ -6,7 +6,12 @@ from pathlib import Path
 import chromadb
 import pytest
 
-from scripts.download_full_release import ReleaseDownloadError, select_release_assets
+from scripts.download_full_release import (
+    ReleaseDownloadError,
+    install_release,
+    select_configured_release_assets,
+    select_release_assets,
+)
 from scripts.package_full_release import (
     ARTIFACT_NAME,
     ReleasePackageError,
@@ -269,3 +274,100 @@ def test_release_asset_selection_requires_consecutive_parts() -> None:
                 {"name": f"{ARTIFACT_NAME}.zip.003"},
             ]
         )
+
+
+def test_configured_assets_preserve_yaml_order_and_single_zip_compatibility() -> None:
+    release_assets = [
+        {"name": f"{ARTIFACT_NAME}_part002.zip"},
+        {"name": f"{ARTIFACT_NAME}.zip"},
+        {"name": f"{ARTIFACT_NAME}_part001.zip"},
+    ]
+
+    parts = select_configured_release_assets(
+        release_assets,
+        [f"{ARTIFACT_NAME}_part001.zip", f"{ARTIFACT_NAME}_part002.zip"],
+    )
+    single = select_configured_release_assets(
+        release_assets,
+        [f"{ARTIFACT_NAME}.zip"],
+    )
+
+    assert [item["name"] for item in parts] == [
+        f"{ARTIFACT_NAME}_part001.zip",
+        f"{ARTIFACT_NAME}_part002.zip",
+    ]
+    assert [item["name"] for item in single] == [f"{ARTIFACT_NAME}.zip"]
+
+
+def test_install_release_merges_configured_parts_and_keeps_zip(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_root = tmp_path / "source"
+    create_release_payload(source_root)
+    chunk_count, paper_count = inspect_chunks(
+        source_root / "data/chunks/full_chunks.jsonl"
+    )
+    chroma = inspect_chroma(
+        source_root / "vector_store/chroma_full", "injection_papers_full"
+    )
+    release_files = collect_release_files(source_root)
+    manifest = build_manifest(
+        release_files,
+        chunk_count=chunk_count,
+        paper_count=paper_count,
+        chroma=chroma,
+        source_commit=None,
+    )
+    manifest_path, sums_path = write_manifest_files(
+        manifest, tmp_path / "manifest"
+    )
+    archive = build_archive(
+        release_files,
+        manifest_path,
+        sums_path,
+        tmp_path / f"{ARTIFACT_NAME}.zip",
+    )
+    archive_bytes = archive.read_bytes()
+    midpoint = len(archive_bytes) // 2
+    names = [
+        f"{ARTIFACT_NAME}_part001.zip",
+        f"{ARTIFACT_NAME}_part002.zip",
+    ]
+    payloads = {
+        names[0]: archive_bytes[:midpoint],
+        names[1]: archive_bytes[midpoint:],
+    }
+    available = [
+        {"name": names[1], "browser_download_url": "test://part2"},
+        {"name": names[0], "browser_download_url": "test://part1"},
+    ]
+
+    monkeypatch.setattr(
+        "scripts.download_full_release.list_release_assets",
+        lambda owner, repo, tag: available,
+    )
+
+    def fake_download(asset, destination):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        content = payloads[asset["name"]]
+        destination.write_bytes(content)
+        return len(content)
+
+    monkeypatch.setattr("scripts.download_full_release.download_asset", fake_download)
+    artifact_dir = tmp_path / "artifacts" / ARTIFACT_NAME
+    config = {
+        "github_owner": "owner",
+        "github_repo": "repo",
+        "release_tag": "tag",
+        "collection_name": "injection_papers_full",
+        "archive_name": f"{ARTIFACT_NAME}.zip",
+        "assets": names,
+    }
+
+    stats = install_release(config, artifact_dir)
+
+    assert (artifact_dir.parent / f"{ARTIFACT_NAME}.zip").read_bytes() == archive_bytes
+    assert (artifact_dir / "data/chunks/full_chunks.jsonl").is_file()
+    assert (artifact_dir / "vector_store/chroma_full").is_dir()
+    assert stats["release_assets"] == 2
+    assert stats["asset_names"] == ",".join(names)

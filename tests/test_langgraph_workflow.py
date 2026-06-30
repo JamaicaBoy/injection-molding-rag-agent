@@ -53,6 +53,25 @@ class MockLLM:
         }
 
 
+class MockFallbackLLM(MockLLM):
+    def generate(
+        self,
+        question: str,
+        query_info: dict[str, Any],
+        evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        output = super().generate(question, query_info, evidence)
+        output.update(
+            {
+                "llm_mode": "mock",
+                "llm_model": "",
+                "llm_fallback_reason": "all local models failed",
+                "confidence": "low",
+            }
+        )
+        return output
+
+
 class MockMemory:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
@@ -151,6 +170,21 @@ def test_langgraph_routes_failed_citation_guard_to_human_review() -> None:
     assert "citation_guard_node" in output["node_history"]
     assert "human_review_node" in output["node_history"]
     assert any("answer_has_no_citation" in error for error in output["errors"])
+
+
+def test_langgraph_never_marks_mock_fallback_as_high_confidence() -> None:
+    retriever = MockRetriever([evidence(index) for index in range(1, 6)])
+    llm = MockFallbackLLM()
+    memory = MockMemory()
+    workflow = make_workflow(retriever, llm, memory)
+
+    output = workflow.run("保压压力对缩水有什么影响？")
+
+    assert output["llm_mode"] == "mock"
+    assert output["confidence"] == "low"
+    assert output["need_human_review"] is True
+    assert output["human_review_reason"] == "tool_error"
+    assert "human_review_node" in output["node_history"]
 
 
 def test_langgraph_can_revise_once_after_citation_failure() -> None:

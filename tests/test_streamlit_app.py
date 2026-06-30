@@ -1,4 +1,10 @@
-from src.app.streamlit_app import evidence_rows, extract_method_names, friendly_error, render_retrieval_stats
+from src.app.streamlit_app import (
+    MODES,
+    evidence_rows,
+    friendly_error,
+    render_retrieval_stats,
+    run_defect_diagnosis,
+)
 
 
 def test_streamlit_helpers_keep_evidence_safe_and_structured() -> None:
@@ -27,8 +33,8 @@ def test_streamlit_helpers_keep_evidence_safe_and_structured() -> None:
     assert "E:/private" not in str(rows)
 
 
-def test_streamlit_helpers_detect_methods_and_hide_local_errors() -> None:
-    assert extract_method_names("对比 GA、PSO 和随机森林") == ["GA", "PSO", "random forest"]
+def test_streamlit_modes_exclude_method_compare_and_hide_local_errors() -> None:
+    assert "方法对比" not in MODES
     message = friendly_error(FileNotFoundError("Chroma missing at E:/private/vector_store"))
     assert "E:/private" not in message
     assert "Chroma" in message
@@ -55,3 +61,32 @@ def test_retrieval_stats_hide_absolute_persist_path(monkeypatch) -> None:
     assert captured["chroma_persist_dir"] == "vector_store/chroma"
     assert captured["collection_name"] == "injection_molding_chunks"
     assert captured["collection_count"] == 1864
+
+
+def test_defect_mode_reuses_rag_generation_and_adds_safety_notice(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run_normal_rag(**kwargs):
+        captured.update(kwargs)
+        return {
+            "answer": "提高注射压力可能增加飞边风险。[E1]",
+            "evidence_list": [{"evidence_id": "E1"}],
+            "confidence": "medium",
+            "need_human_review": False,
+            "limitations": [],
+        }
+
+    monkeypatch.setattr("src.app.streamlit_app.run_normal_rag", fake_run_normal_rag)
+    output = run_defect_diagnosis(
+        question="飞边可能是什么原因？",
+        top_k=5,
+        rewrite={"normalized_query": "飞边 flash 原因"},
+        corpus_mode="full",
+        workflow_backend="langgraph",
+        conversation_id="conversation_1",
+    )
+
+    assert captured["workflow_backend"] == "langgraph"
+    assert captured["conversation_id"] == "conversation_1"
+    assert output["answer"].startswith("提高注射压力")
+    assert any("不构成直接生产调参指令" in item for item in output["limitations"])
