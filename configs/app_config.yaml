@@ -6,6 +6,11 @@ app:
 llm:
   provider: ollama
   model: qwen2.5:7b
+  fallback_models:
+    - qwen3:4b
+  num_ctx: 1024
+  num_batch: 64
+  timeout_seconds: 240
   base_url: http://localhost:11434
 
 embedding:
