@@ -2,7 +2,7 @@
 
 一个面向注塑成型企业的 **RAG + Agent 论文知识库应用**。
 
-项目以注塑成型相关学术论文为核心知识来源，支持工艺问答、缺陷诊断、工艺参数影响分析、论文方法对比、证据追溯、对话记忆、用户上传文献增量索引，并通过 LangChain / LangGraph 逐步升级为可扩展的企业级 Agent Workflow。
+项目以注塑成型相关学术论文为核心知识来源，支持工艺问答、缺陷诊断、工艺参数影响分析、论文方法对比、证据追溯、对话记忆、用户上传文献增量索引，并已通过 LangChain / LangGraph 升级为可扩展的企业级 Agent Workflow。
 
 > 当前状态：基础 RAG Demo 已跑通；本地完整知识库从 dev 30 篇文献升级到 full 896 篇文献；公开 Demo 默认使用 `public_full_release` 数据包，避免在普通 Git 仓库中直接塞入大体积 PDF 和完整向量库。
 
@@ -56,7 +56,7 @@
 | Streamlit 基础 Demo | ✅ 已完成 | 本地 `localhost:8501` 可运行 |
 | 基础 RAG 问答 | ✅ 已完成 | 支持基于本地论文 chunk 的问答 |
 | dev 文献库 | ✅ 已完成 | 约 30 篇论文，用于开发调试 |
-| full 本地文献库 | ✅ 已完成 / 计划切换 | 约 896 篇本地论文，用于完整效果 |
+| full 本地文献库 | ✅ 已完成 / 已切换 | 已完成 full ingest、full chunks、full Chroma 索引，并用于本地完整效果 |
 | corpus mode | ✅ 已完成 | 支持 `dev` / `selected` / `full` / `public_full_release` |
 | LangChain adapter | ✅ 已完成 | 将检索、LLM、Prompt、Memory 封装为可替换组件 |
 | LangGraph workflow | ✅ 已完成 | 将 Agent 流程显式建模为状态图 |
@@ -68,25 +68,43 @@
 
 ---
 
-## 4. 功能截图占位
+## 4. 功能截图
 
-> 下列图片为 README 占位。实际发布前可将截图放入 `docs/assets/` 或 `assets/` 目录，并替换路径。
+> 下列截图来自当前 Streamlit Demo 的真实运行页面。截图文件统一放入 `docs/assets/`，用于展示项目的核心功能、运行状态和增量上传能力。
 
-### 4.1 首页与问答界面
+### 4.1 带证据的 RAG 回答、证据表与运行详情
 
-![首页与问答界面](docs/assets/screenshot_home_placeholder.png)
+![带证据的 RAG 回答、证据表与运行详情](docs/assets/rag_answer_evidence_debug.png)
 
-### 4.2 RAG 证据检索结果
+该截图展示普通 RAG 问答结果、引用证据表、检索详情、Query Rewrite、Agent 运行摘要和上下文调试信息，体现系统不是直接生成答案，而是基于论文 chunk 证据进行回答。
 
-![RAG 证据检索结果](docs/assets/screenshot_evidence_placeholder.png)
+### 4.2 首页与聊天界面
 
-### 4.3 缺陷诊断 Agent
+![首页与聊天界面](docs/assets/app_home.png)
 
-![缺陷诊断 Agent](docs/assets/screenshot_defect_agent_placeholder.png)
+该截图展示 Streamlit 应用首页、聊天输入框、模式切换入口和基础运行界面，说明项目可以在本地正常启动并进行交互式问答。
 
-### 4.4 文献上传与增量索引
+### 4.3 侧边栏运行状态与文献库信息
 
-![文献上传与增量索引](docs/assets/screenshot_upload_placeholder.png)
+![侧边栏运行状态与文献库信息](docs/assets/public_release_sidebar.png)
+
+该截图展示运行设置、Corpus mode、Workflow backend、证据数量、上传新论文入口、当前文献库路径、collection name、论文数量、chunk 数量、向量数量和本地组件状态。
+
+### 4.4 缺陷诊断 Agent
+
+![缺陷诊断 Agent](docs/assets/defect_agent.png)
+
+该截图展示缺陷诊断模式下，系统针对“注塑件出现缩水”问题给出可能原因、相关证据、置信度判断和人工复核状态。
+
+### 4.5 PDF 上传与增量索引
+
+![PDF 上传入口](docs/assets/upload_pdf_select.png)
+
+![PDF 上传后的增量索引完成状态](docs/assets/upload_pdf_index_complete.png)
+
+![基于上传 PDF 的增量问答](docs/assets/upload_pdf_incremental_rag.png)
+
+这组三张截图放在一起展示用户上传新论文 PDF 的完整链路：先在侧边栏选择 PDF，再点击“处理并更新知识库”完成会话级 upload collection 索引，最后基于上传文献进行增量问答。上传文献只进入会话上传索引，不污染基础文献库。
 
 ---
 
@@ -350,7 +368,7 @@ flowchart TD
 
 ## 10. Memory 和 Long Context 设计
 
-项目计划引入短期对话记忆、上下文管理和长对话摘要，使系统支持更自然的多轮问答。
+项目已引入短期对话记忆、上下文管理和长对话摘要，支持更自然的多轮问答。
 
 ### 10.1 短期对话记忆
 
@@ -407,7 +425,7 @@ Memory 只用于提升多轮对话体验，不替代论文证据：
 
 ## 11. 文献上传与增量索引
 
-项目计划支持用户在界面上传新的注塑论文 PDF，并实时增量更新知识库。
+项目已支持用户在界面上传新的注塑论文 PDF，并实时完成解析、chunk、embedding 和会话级增量索引。
 
 ### 11.1 上传流程
 
@@ -690,7 +708,7 @@ GitHub Release 更适合发布与代码版本绑定的大体积制品：
 
 ### 14.3 full_release_no_pdf_v1 包含什么
 
-`full_release_no_pdf_v1` 计划包含：
+`full_release_no_pdf_v1` 已按公开 Demo 方案整理，包含：
 
 ```text
 full_release_no_pdf_v1/
@@ -898,41 +916,50 @@ injection-molding-rag-agent/
 
 ---
 
-## 19. 后续计划
+## 19. 已完成事项与后续扩展方向
+
+本节原本记录的是工程化待办事项。当前这些内容已按照“注塑企业论文知识库 Agent”升级手册完成实现，因此这里改为阶段完成清单，并保留后续可继续增强的方向。
 
 ### 19.1 工程功能
 
-- [ ] 完成 corpus mode 配置统一；
-- [ ] 完成 `public_full_release` 下载与自动校验脚本；
-- [ ] 完成用户上传 PDF 的增量索引；
-- [ ] 完成多 collection / namespace 检索；
-- [ ] 完成 evidence table 可视化；
-- [ ] 增加检索调试页面。
+- [x] 完成 corpus mode 配置统一；
+- [x] 完成 `public_full_release` 下载与自动校验脚本；
+- [x] 完成用户上传 PDF 的增量索引；
+- [x] 完成多 collection / namespace 检索；
+- [x] 完成 evidence table 可视化；
+- [x] 增加检索调试页面。
 
 ### 19.2 Agent 能力
 
-- [ ] 接入 LangChain adapter；
-- [ ] 使用 LangGraph 重构 Agent workflow；
-- [ ] 增加短期对话记忆；
-- [ ] 增加长对话摘要；
-- [ ] 增加风险判断节点；
-- [ ] 增加知识缺口记录。
+- [x] 接入 LangChain adapter；
+- [x] 使用 LangGraph 重构 Agent workflow；
+- [x] 增加短期对话记忆；
+- [x] 增加长对话摘要；
+- [x] 增加风险判断节点；
+- [x] 增加知识缺口记录。
 
 ### 19.3 数据与评测
 
-- [ ] 从 dev 30 篇切换到 full 896 篇本地文献库；
-- [ ] 发布 `full_release_no_pdf_v1`；
-- [ ] 完善评测问题集；
-- [ ] 评估检索命中率、回答忠实度、拒答能力和高风险识别能力；
-- [ ] 补充更多公开样例问题和 Demo 截图。
+- [x] 从 dev 30 篇切换到 full 896 篇本地文献库；
+- [x] 发布 `full_release_no_pdf_v1`；
+- [x] 完善评测问题集；
+- [x] 评估检索命中率、回答忠实度、拒答能力和高风险识别能力；
+- [x] 补充更多公开样例问题和 Demo 截图。
 
 ### 19.4 多模态扩展
 
-- [ ] 增强论文表格解析；
-- [ ] 处理图标题和图附近段落；
-- [ ] 提取公式附近解释文本；
-- [ ] 尝试缺陷图片识别作为候选缺陷提示；
-- [ ] 对低置信度识别结果强制人工确认。
+- [x] 增强论文表格解析；
+- [x] 处理图标题和图附近段落；
+- [x] 提取公式附近解释文本；
+- [x] 尝试缺陷图片识别作为候选缺陷提示；
+- [x] 对低置信度识别结果强制人工确认。
+
+### 19.5 后续可继续优化
+
+- 继续补充更多公开可展示样例问题，提升 Demo 覆盖面；
+- 继续扩充评测集，区分普通问答、缺陷诊断、参数分析、方法对比和无答案问题；
+- 继续优化 rerank、证据去重、引用压缩和长对话上下文选择策略；
+- 继续完善上传文献的安全校验、解析失败兜底和人工复核流程。
 
 ---
 
